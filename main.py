@@ -145,4 +145,4 @@ if __name__ == "__main__":
         except Exception as cleanup_error:
             logger.error(f"Ошибка при попытке корректного завершения: {cleanup_error}")
     finally:
-        logger.info("Приложение завершено") 
+        logger.info("Приложение завершено")

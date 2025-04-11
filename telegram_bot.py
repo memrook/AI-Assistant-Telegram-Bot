@@ -42,6 +42,7 @@ session_manager = None
 initialization_message = None
 pdf_processor = None
 
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
     # Если бот еще не инициализирован, запускаем инициализацию
@@ -56,11 +57,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "❌ Не удалось инициализировать бота. Пожалуйста, обратитесь к администратору."
             )
             return
-    
+
     await update.message.reply_text(
         "Привет! Я AI-ассистент, который поможет вам найти информацию в документах. "
         "Задайте мне вопрос, и я постараюсь на него ответить."
     )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /help"""
@@ -72,8 +74,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/reset - Сбросить историю разговора\n"
         "/status - Получить статус обработки документов\n"
         "/cancel - Отменить текущую обработку документов\n"
-        "/history - Показать историю разговора"
+        "/history - Показать историю разговора\n"
+        "/reindex - Принудительно пересоздать поисковый индекс"
     )
+
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /reset"""
@@ -81,59 +85,63 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await session_manager.reset_user_thread(user_id)
     await update.message.reply_text("История разговора сброшена. Можете начать новый диалог.")
 
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /status - показывает текущее состояние обработки"""
     global initialization_message, session_manager
-    
+
     if not session_manager:
         await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
         return
-        
+
     if initialization_message:
         current_text = initialization_message.text
         await update.message.reply_text(f"📊 Текущий статус:\n\n{current_text}")
     else:
         await update.message.reply_text("✅ Инициализация завершена. Бот готов к работе.")
 
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /cancel - отменяет текущую обработку документов"""
     global pdf_processor
-    
+
     if not 'pdf_processor' in globals() or pdf_processor is None:
         await update.message.reply_text("⚠️ Нет активного процесса обработки документов.")
         return
-    
+
     if hasattr(pdf_processor, 'is_processing') and pdf_processor.is_processing:
         # Устанавливаем флаг отмены
         pdf_processor.is_processing = False
-        await update.message.reply_text("🛑 Обработка документов прервана. Обработка текущего документа будет завершена.")
+        await update.message.reply_text(
+            "🛑 Обработка документов прервана. Обработка текущего документа будет завершена.")
     else:
         await update.message.reply_text("⚠️ Нет активного процесса обработки документов.")
+
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /history - показывает историю разговора"""
     global session_manager
-    
+
     if not session_manager:
         await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
         return
-    
+
     user_id = update.effective_user.id
     history = session_manager.get_conversation_history(user_id)
-    
+
     if history == "История разговора пуста.":
         await update.message.reply_text("У вас еще нет истории разговора с ботом.")
     else:
         # Разбиваем историю на части, если она слишком длинная
         max_length = 4000  # Максимальная длина сообщения в Telegram
-        
+
         if len(history) <= max_length:
             await update.message.reply_text(f"📝 История разговора:\n\n{history}")
         else:
             # Разбиваем на части
             parts = []
             current_part = ""
-            
+
             for line in history.split("\n\n"):
                 if len(current_part) + len(line) + 2 > max_length:
                     parts.append(current_part)
@@ -143,15 +151,112 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         current_part += "\n\n" + line
                     else:
                         current_part = line
-            
+
             if current_part:
                 parts.append(current_part)
-            
+
             # Отправляем части
             await update.message.reply_text(f"📝 История разговора (часть 1/{len(parts)}):\n\n{parts[0]}")
-            
+
             for i, part in enumerate(parts[1:], 2):
                 await update.message.reply_text(f"📝 История разговора (часть {i}/{len(parts)}):\n\n{part}")
+
+
+async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /reindex - принудительно пересоздает поисковый индекс"""
+    global pdf_processor, session_manager, initialization_message
+    
+    if not pdf_processor:
+        await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
+        return
+    
+    # Проверяем, что процессор не занят
+    if hasattr(pdf_processor, 'is_processing') and pdf_processor.is_processing:
+        await update.message.reply_text(
+            "⚠️ В данный момент уже выполняется обработка документов. Дождитесь окончания или используйте /cancel для отмены."
+        )
+        return
+    
+    # Отправляем сообщение о начале процесса
+    progress_message = await update.message.reply_text("🔄 Начинаю пересоздание поискового индекса...")
+    initialization_message = progress_message
+    
+    # Создаем функцию обратного вызова для отображения прогресса
+    async def update_progress(message):
+        nonlocal progress_message
+        if progress_message:
+            try:
+                await progress_message.edit_text(message)
+            except Exception as e:
+                # Если сообщение слишком длинное, отправляем новое
+                if "message is too long" in str(e).lower() or "message is not modified" in str(e).lower():
+                    progress_message = await progress_message.reply_text(message)
+    
+    # Устанавливаем callback для обновления сообщений
+    pdf_processor.update_callback = update_progress
+    
+    try:
+        # Пересоздаем индекс принудительно
+        search_index = await pdf_processor.create_search_index(force_recreate=True)
+        
+        if not search_index:
+            await progress_message.edit_text(
+                "❌ Не удалось создать поисковый индекс. Проверьте логи для получения дополнительной информации."
+            )
+            return
+            
+        # Создаем инструмент поиска и обновляем ассистента
+        await progress_message.edit_text("🔧 Создаем инструмент поиска и обновляем ассистента...")
+        
+        # Создаем инструмент поиска
+        search_tool = sdk.tools.search_index(search_index)
+        
+        # Проверяем текущего ассистента
+        if session_manager and session_manager.assistant:
+            # Создаем нового ассистента с обновленным инструментом поиска
+            model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+            
+            # Настроим модель (используем тот же код, что и при начальной инициализации)
+            try:
+                # Применяем настройки модели из основного кода
+                model = model.configure(temperature=DEFAULT_TEMPERATURE)
+            except Exception as e:
+                logger.error(f"Ошибка при настройке модели: {e}")
+            
+            # Создаем нового ассистента с новым инструментом поиска
+            instruction = """Вы - умный ассистент агронома, который помогает пользователям находить информацию в документах.
+
+При ответе на вопросы следуйте этим правилам:
+1. Всегда используйте инструмент поиска для нахождения релевантной информации в документах.
+2. Если в документах есть ответ на вопрос, используйте ТОЛЬКО информацию из документов.
+3. Если информации в документах недостаточно, укажите это и дополните ответ своими знаниями.
+4. Если в документах нет ответа на вопрос, сообщите об этом и ответьте на основе своих знаний.
+5. Всегда будьте вежливы, информативны и старайтесь дать максимально полный ответ.
+6. Отвечайте на русском языке, даже если вопрос задан на другом языке.
+7. Если вопрос двусмысленный или неясный, попросите уточнить детали.
+8. При ответе на основе документов, указывайте источник информации.
+
+Ваша основная задача - предоставлять точную и полезную информацию из загруженных документов."""
+            
+            try:
+                assistant = sdk.assistants.create(model, tools=[search_tool], instruction=instruction)
+            except Exception as e:
+                logger.error(f"Ошибка при создании ассистента: {e}")
+                # Пробуем базовый вариант без инструкции
+                assistant = sdk.assistants.create(model, tools=[search_tool])
+            
+            # Обновляем ассистента в менеджере сессий
+            session_manager.assistant = assistant
+            
+            await progress_message.edit_text("✅ Поисковый индекс успешно пересоздан и ассистент обновлен!")
+        else:
+            await progress_message.edit_text(
+                "⚠️ Поисковый индекс создан, но не удалось обновить ассистента. Попробуйте перезапустить бота командой /start"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при пересоздании индекса: {e}")
+        await progress_message.edit_text(f"❌ Произошла ошибка при пересоздании индекса: {str(e)[:100]}...")
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
@@ -167,17 +272,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "❌ Не удалось инициализировать бота. Пожалуйста, обратитесь к администратору."
             )
             return
-    
+
     user_id = update.effective_user.id
     user_message = update.message.text
-    
+
     # Отправляем сообщение о том, что бот обрабатывает запрос
     processing_message = await update.message.reply_text("Обрабатываю ваш запрос...")
-    
+
     try:
         # Получаем ответ от ассистента
         response = await session_manager.send_message(user_id, user_message)
-        
+
         # Отправляем ответ пользователю
         await processing_message.edit_text(response)
     except Exception as e:
@@ -185,6 +290,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await processing_message.edit_text(
             "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз."
         )
+
 
 async def initialize_yandex_cloud(update: Update = None):
     """Инициализация Yandex Cloud SDK и создание ассистента"""
@@ -212,43 +318,63 @@ async def initialize_yandex_cloud(update: Update = None):
                 if "message is too long" in str(e).lower() or "message is not modified" in str(e).lower():
                     progress_message = await progress_message.reply_text(message)
     
-    # Конвертирование PDF и создание индекса
-    logger.info("Начинаем обработку PDF-файлов")
+    # Инициализация PDF процессора
+    logger.info("Инициализация PDF процессора")
     pdf_processor = PDFProcessor(sdk, update_callback=update_progress)
     
-    # Обработка документов
-    files = await pdf_processor.convert_and_upload_pdfs()
+    # Проверяем существование индекса
+    search_index = None
+    existing_index = await pdf_processor.check_existing_index()
+    
+    if existing_index:
+        # Если существующий индекс найден, используем его
+        search_index = existing_index
+        if progress_message:
+            await progress_message.edit_text(f"✅ Использую существующий поисковый индекс: {search_index.id}")
+    else:
+        # Если индекс не найден, обрабатываем документы и создаем новый
+        if progress_message:
+            await progress_message.edit_text("Существующий индекс не найден. Начинаю обработку PDF-файлов...")
+            
+        # Обработка документов
+        files = await pdf_processor.convert_and_upload_pdfs()
+        
+        # Создание индекса
+        if files:
+            search_index = await pdf_processor.create_search_index()
+            if not search_index and progress_message:
+                await progress_message.edit_text(
+                    "⚠️ Не удалось создать поисковый индекс. Бот будет работать в режиме обычного ассистента."
+                )
+        elif progress_message:
+            await progress_message.edit_text(
+                "⚠️ Нет файлов для индексации. Бот будет работать в режиме обычного ассистента."
+            )
     
     # Создание инструмента поиска
     search_tool = None
-    if files:
-        # Пытаемся создать поисковый индекс
+    if search_index:
         try:
-            search_index = await pdf_processor.create_search_index()
-            if search_index:
-                if progress_message:
-                    await progress_message.edit_text("🔍 Поисковый индекс создан успешно. Создаем инструмент поиска...")
-                    
-                # Создаем инструмент поиска
-                search_tool = sdk.tools.search_index(search_index)
-                logger.info(f"Поисковый индекс успешно создан, ID: {search_index.id}")
-            else:
-                if progress_message:
-                    await progress_message.edit_text("⚠️ Не удалось создать поисковый индекс. Бот будет работать в режиме обычного ассистента.")
-        except Exception as e:
-            logger.error(f"Ошибка при создании поискового индекса: {e}")
+            # Создаем инструмент поиска на основе индекса
             if progress_message:
-                await progress_message.edit_text(f"⚠️ Ошибка при создании поискового индекса: {str(e)[:100]}...\nБот будет работать в режиме обычного ассистента.")
-    else:
-        if progress_message:
-            await progress_message.edit_text("⚠️ Нет файлов для индексации. Бот будет работать в режиме обычного ассистента.")
+                await progress_message.edit_text("🔍 Создаю инструмент поиска на основе индекса...")
+            
+            search_tool = sdk.tools.search_index(search_index)
+            logger.info(f"Инструмент поиска создан на основе индекса: {search_index.id}")
+        except Exception as e:
+            logger.error(f"Ошибка при создании инструмента поиска: {e}")
+            if progress_message:
+                await progress_message.edit_text(
+                    f"⚠️ Ошибка при создании инструмента поиска: {str(e)[:100]}...\n"
+                    "Бот будет работать в режиме обычного ассистента."
+                )
     
     # Создание ассистента (с инструментом поиска или без него)
     if progress_message:
         await progress_message.edit_text("🔧 Создаем ассистента...")
     
     logger.info("Создаем ассистента")
-    model = sdk.models.completions("yandexgpt", model_version="rc")
+    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
     
     # Настраиваем модель с правильными параметрами
     try:
@@ -266,7 +392,7 @@ async def initialize_yandex_cloud(update: Update = None):
                 # Вариант 2: возможно, нужно использовать просто temperature
                 model = model.configure(temperature=DEFAULT_TEMPERATURE)
                 logger.info(f"Модель настроена только с температурой {DEFAULT_TEMPERATURE}")
-                
+
                 # Попробуем добавить системный промпт через другие методы, если они доступны
                 if hasattr(model, 'with_system_prompt'):
                     model = model.with_system_prompt(DEFAULT_SYSTEM_PROMPT)
@@ -276,12 +402,12 @@ async def initialize_yandex_cloud(update: Update = None):
     except Exception as e:
         logger.error(f"Ошибка при настройке модели: {e}")
         # Продолжаем работу с моделью по умолчанию, без дополнительных настроек
-    
+
     # Добавляем инструмент поиска, только если он был создан
     tools = [search_tool] if search_tool else []
     mode = "с гибридным поиском по документам" if search_tool else "в режиме обычного ассистента (без поиска по документам)"
     logger.info(f"Создаем ассистента {mode}")
-    
+
     # Инструкция для ассистента с поиском по документам
     instruction = """Вы - умный ассистент агронома, который помогает пользователям находить информацию в документах.
 
@@ -296,7 +422,7 @@ async def initialize_yandex_cloud(update: Update = None):
 8. При ответе на основе документов, указывайте источник информации.
 
 Ваша основная задача - предоставлять точную и полезную информацию из загруженных документов."""
-    
+
     try:
         # Вариант 1: создание ассистента с указанными инструментами, моделью и инструкцией
         if search_tool:
@@ -327,25 +453,26 @@ async def initialize_yandex_cloud(update: Update = None):
         # Пробуем создать базового ассистента в случае ошибки
         assistant = sdk.assistants.create(model)
         logger.warning("Создан базовый ассистент из-за ошибки")
-    
+
     # Инициализация менеджера сессий
     if progress_message:
         await progress_message.edit_text(f"🔧 Инициализация менеджера сессий... Ассистент работает {mode}.")
-    
+
     logger.info("Инициализация менеджера сессий")
     session_manager = SessionManager(sdk, assistant)
-    
+
     if progress_message:
         await progress_message.edit_text(f"✅ Инициализация завершена! Бот готов к работе {mode}.")
-    
+
     return True
+
 
 async def main() -> None:
     """Запуск бота"""
     # Создание бота
     logger.info("Запуск бота")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -353,22 +480,23 @@ async def main() -> None:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("history", history_command))
-    
+    application.add_handler(CommandHandler("reindex", reindex_command))
+
     # Регистрация обработчика текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+
     # Настраиваем graceful shutdown
     application.post_shutdown = shutdown_handler
-    
+
     # Запуск бота (без блокировки)
     try:
         await application.initialize()
         await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-        
+
         # Сообщаем, что бот запущен и готов
         logger.info("Бот успешно запущен и готов к работе")
-        
+
         # Возвращаем объект приложения, чтобы иметь возможность корректно завершить его позже
         return application
     except Exception as e:
@@ -383,6 +511,7 @@ async def main() -> None:
             logger.error(f"Ошибка при остановке бота: {stop_error}")
         raise e
 
+
 async def shutdown_handler(application: Application) -> None:
     """Обработчик завершения работы бота"""
     logger.info("Выполняем дополнительные действия при остановке бота...")
@@ -390,5 +519,6 @@ async def shutdown_handler(application: Application) -> None:
     # Например, закрытие соединений с базой данных или другими сервисами
     logger.info("Дополнительные действия выполнены, бот успешно завершен")
 
+
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

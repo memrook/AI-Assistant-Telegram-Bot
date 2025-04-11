@@ -3,6 +3,7 @@ import logging
 import ssl
 import time
 import asyncio
+import json
 from pathlib import Path
 from docling.document_converter import DocumentConverter
 from yandex_cloud_ml_sdk import YCloudML
@@ -17,12 +18,16 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 logger = logging.getLogger(__name__)
 
+# Путь к файлу для хранения ID индекса
+INDEX_CONFIG_FILE = "data/index_config.json"
+
 class PDFProcessor:
     def __init__(self, sdk: YCloudML, update_callback=None, max_processing_time=600):
         self.sdk = sdk
         self.converter = DocumentConverter()
         self.files = []
         self.index = None
+        self.index_id = None
         self.update_callback = update_callback
         self.max_processing_time = max_processing_time  # Максимальное время обработки в секундах (по умолчанию 10 минут)
         self.is_processing = False
@@ -34,6 +39,39 @@ class PDFProcessor:
             "start_time": 0,
             "elapsed_time": 0
         }
+        
+        # Загрузка конфигурации индекса при инициализации
+        self._load_index_config()
+        
+    def _load_index_config(self):
+        """Загружает конфигурацию индекса из файла"""
+        try:
+            if os.path.exists(INDEX_CONFIG_FILE):
+                with open(INDEX_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.index_id = config.get('index_id')
+                    logger.info(f"Загружен ID индекса из конфигурации: {self.index_id}")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке конфигурации индекса: {e}")
+            self.index_id = None
+            
+    def _save_index_config(self):
+        """Сохраняет конфигурацию индекса в файл"""
+        try:
+            # Создаем директорию, если ее нет
+            Path(os.path.dirname(INDEX_CONFIG_FILE)).mkdir(parents=True, exist_ok=True)
+            
+            config = {
+                'index_id': self.index_id,
+                'created_at': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            with open(INDEX_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"Конфигурация индекса сохранена в {INDEX_CONFIG_FILE}")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении конфигурации индекса: {e}")
         
     def create_progress_bar(self, progress, total, length=20):
         """Создает прогресс-бар для отображения хода обработки"""
@@ -199,9 +237,45 @@ class PDFProcessor:
         )
         return self.files
         
-    async def create_search_index(self):
+    async def check_existing_index(self):
+        """Проверяет существование ранее созданного индекса"""
+        if not self.index_id:
+            logger.info("ID индекса не найден в конфигурации")
+            return None
+            
+        try:
+            await self._send_progress_update(f"Проверка существующего индекса с ID: {self.index_id}...")
+            
+            try:
+                # Пытаемся получить индекс по ID
+                existing_index = self.sdk.search_indexes.get(self.index_id)
+                
+                if existing_index:
+                    self.index = existing_index
+                    await self._send_progress_update(f"✅ Найден существующий индекс с ID: {self.index_id}")
+                    return existing_index
+                else:
+                    await self._send_progress_update(f"⚠️ Не удалось найти индекс с ID: {self.index_id}")
+                    return None
+            except Exception as e:
+                logger.error(f"Ошибка при проверке индекса: {e}")
+                await self._send_progress_update(f"⚠️ Ошибка при проверке индекса: {str(e)[:100]}...")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при проверке индекса: {e}")
+            return None
+            
+    async def create_search_index(self, force_recreate=False):
         """Создает поисковый индекс на основе загруженных файлов"""
         try:
+            # Если не указано принудительное пересоздание, пробуем использовать существующий индекс
+            if not force_recreate and self.index_id:
+                existing_index = await self.check_existing_index()
+                if existing_index:
+                    return existing_index
+                    
+            # Если существующий индекс не найден или требуется пересоздание
             if not self.files:
                 await self._send_progress_update("⚠️ Нет файлов для создания индекса")
                 return None
@@ -257,6 +331,12 @@ class PDFProcessor:
             
             # Получаем результат
             self.index = operation.wait()  # Этот метод должен быть доступен
+            
+            # Сохраняем ID индекса
+            if self.index and hasattr(self.index, 'id'):
+                self.index_id = self.index.id
+                self._save_index_config()
+                
             duration = time.time() - start_time
             await self._send_progress_update(f"✅ Поисковый индекс успешно создан (заняло {duration:.1f} сек), ID: {self.index.id}")
             return self.index
