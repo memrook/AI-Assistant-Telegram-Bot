@@ -4,6 +4,7 @@ import ssl
 import time
 import asyncio
 import json
+import fitz  # PyMuPDF
 from pathlib import Path
 from docling.document_converter import DocumentConverter
 from yandex_cloud_ml_sdk import YCloudML
@@ -39,9 +40,12 @@ class PDFProcessor:
             "start_time": 0,
             "elapsed_time": 0
         }
+        # Словарь для хранения метаданных об изображениях: {pdf_file_name: {img_id: img_path}}
+        self.image_metadata = {}
         
         # Загрузка конфигурации индекса при инициализации
         self._load_index_config()
+        self._load_images_metadata()
         
     def _load_index_config(self):
         """Загружает конфигурацию индекса из файла"""
@@ -72,6 +76,32 @@ class PDFProcessor:
             logger.info(f"Конфигурация индекса сохранена в {INDEX_CONFIG_FILE}")
         except Exception as e:
             logger.error(f"Ошибка при сохранении конфигурации индекса: {e}")
+        
+    def _load_images_metadata(self):
+        """Загружает метаданные об изображениях из файла"""
+        metadata_file = "data/images_metadata.json"
+        try:
+            if os.path.exists(metadata_file):
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    self.image_metadata = json.load(f)
+                    logger.info(f"Загружены метаданные о {len(self.image_metadata)} PDF-файлах с изображениями")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке метаданных изображений: {e}")
+            self.image_metadata = {}
+    
+    def _save_images_metadata(self):
+        """Сохраняет метаданные об изображениях в файл"""
+        metadata_file = "data/images_metadata.json"
+        try:
+            # Создаем директорию, если ее нет
+            Path(os.path.dirname(metadata_file)).mkdir(parents=True, exist_ok=True)
+            
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(self.image_metadata, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"Метаданные изображений сохранены в {metadata_file}")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении метаданных изображений: {e}")
         
     def create_progress_bar(self, progress, total, length=20):
         """Создает прогресс-бар для отображения хода обработки"""
@@ -105,14 +135,67 @@ class PDFProcessor:
             else:
                 await self.update_callback(message)
         
-    async def convert_and_upload_pdfs(self, docs_dir="./data/docs", md_dir="./data/md"):
+    async def extract_images(self, pdf_path, img_dir="./data/images"):
+        """Извлекает изображения из PDF-файла и сохраняет их в указанную директорию"""
+        try:
+            # Создаем директорию для изображений, если она не существует
+            Path(img_dir).mkdir(parents=True, exist_ok=True)
+            
+            pdf_name = Path(pdf_path).stem
+            extracted_images = {}
+            
+            # Открываем PDF файл
+            doc = fitz.open(pdf_path)
+            
+            # Проходим по всем страницам и извлекаем изображения
+            for page_num, page in enumerate(doc):
+                image_list = page.get_images(full=True)
+                
+                # Проходим по всем изображениям на странице
+                for img_index, img in enumerate(image_list):
+                    xref = img[0]  # Ссылка на изображение
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    # Определяем расширение изображения
+                    ext = base_image["ext"]
+                    if ext.upper() == "JPG":
+                        ext = "jpeg"  # Telegram API предпочитает "jpeg" вместо "jpg"
+                    
+                    # Генерируем уникальное имя файла
+                    img_filename = f"{pdf_name}_p{page_num+1}_i{img_index+1}.{ext}"
+                    img_path = os.path.join(img_dir, img_filename)
+                    
+                    # Сохраняем изображение на диск
+                    with open(img_path, "wb") as img_file:
+                        img_file.write(image_bytes)
+                    
+                    # Сохраняем информацию об изображении
+                    image_id = f"img_{page_num+1}_{img_index+1}"
+                    extracted_images[image_id] = img_path
+                    logger.info(f"Извлечено изображение: {img_path}")
+            
+            # Сохраняем метаданные об изображениях
+            if extracted_images:
+                self.image_metadata[pdf_name] = extracted_images
+                self._save_images_metadata()
+                
+            logger.info(f"Извлечено {len(extracted_images)} изображений из {pdf_path}")
+            return extracted_images
+            
+        except Exception as e:
+            logger.error(f"Ошибка при извлечении изображений из {pdf_path}: {e}")
+            return {}
+            
+    async def convert_and_upload_pdfs(self, docs_dir="./data/docs", md_dir="./data/md", img_dir="./data/images"):
         """Конвертирует PDF-файлы в Markdown и загружает их в Yandex Cloud"""
         
         self.is_processing = True
         self.progress_info["start_time"] = time.time()
         
-        # Создаем директорию для Markdown-файлов, если она не существует
+        # Создаем директории, если они не существуют
         Path(md_dir).mkdir(parents=True, exist_ok=True)
+        Path(img_dir).mkdir(parents=True, exist_ok=True)
         
         pdf_files = list(Path(docs_dir).glob("*.pdf"))
         total_files = len(pdf_files)
@@ -193,6 +276,16 @@ class PDFProcessor:
                     await self._send_progress_update(f"{file_progress} Экспорт документа {pdf_path.name} в Markdown...")
                     content = result.document.export_to_markdown()
                     
+                    # Извлекаем изображения из PDF
+                    self.progress_info["current_step"] = "Извлечение изображений"
+                    await self._send_progress_update(f"{file_progress} Извлечение изображений из {pdf_path.name}...")
+                    images = await self.extract_images(str(pdf_path), img_dir)
+                    
+                    # Добавляем информацию об изображениях в Markdown
+                    if images:
+                        content += f"\n\n<!-- IMAGES: {json.dumps({pdf_path.stem: [path for id, path in images.items()]}, ensure_ascii=False)} -->"
+                        await self._send_progress_update(f"{file_progress} Извлечено {len(images)} изображений из {pdf_path.name}")
+                    
                     with open(md_path, "wt", encoding="utf-8") as f:
                         f.write(content)
                     
@@ -205,6 +298,26 @@ class PDFProcessor:
                     continue
             else:
                 await self._send_progress_update(f"{file_progress} Файл {md_path.name} уже существует, пропускаем конвертацию")
+                
+                # Проверяем, есть ли изображения для этого PDF
+                pdf_stem = pdf_path.stem
+                if pdf_stem not in self.image_metadata and os.path.exists(pdf_path):
+                    self.progress_info["current_step"] = "Извлечение изображений"
+                    await self._send_progress_update(f"{file_progress} Извлечение изображений из {pdf_path.name}...")
+                    images = await self.extract_images(str(pdf_path), img_dir)
+                    
+                    if images:
+                        # Обновляем файл Markdown, добавляя информацию об изображениях
+                        with open(md_path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                            
+                        if "<!-- IMAGES:" not in content:
+                            content += f"\n\n<!-- IMAGES: {json.dumps({pdf_path.stem: [path for id, path in images.items()]}, ensure_ascii=False)} -->"
+                            
+                            with open(md_path, "w", encoding="utf-8") as f:
+                                f.write(content)
+                                
+                        await self._send_progress_update(f"{file_progress} Извлечено {len(images)} изображений из {pdf_path.name}")
             
             # Снова проверяем, не была ли отменена обработка
             if not self.is_processing:

@@ -1,5 +1,8 @@
 import logging
 import json
+import re
+import os
+from pathlib import Path
 from typing import Dict, Optional, List
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk._assistants.assistant import Assistant
@@ -167,11 +170,63 @@ class SessionManager:
                 response = result.content
             else:
                 response = "Получен пустой ответ от ассистента."
+            
+            # Проверяем, есть ли упоминания изображений в ответе и добавляем теги изображений
+            response = self._enhance_response_with_images(response)
                 
             return response
         except Exception as e:
             logger.error(f"Ошибка при форматировании ответа: {e}")
             return "Ошибка форматирования ответа ассистента."
+    
+    def _enhance_response_with_images(self, response):
+        """Улучшает ответ, добавляя ссылки на изображения, если они упоминаются"""
+        try:
+            # Ищем упоминания PDF файлов
+            pdf_mentions = re.findall(r'документ[а-яё\s]*[«"\'](.*?)[»"\']', response, re.IGNORECASE)
+            pdf_mentions += re.findall(r'файл[а-яё\s]*[«"\'](.*?)[»"\']', response, re.IGNORECASE)
+            pdf_mentions += re.findall(r'из[а-яё\s]*[«"\'](.*?)[»"\']', response, re.IGNORECASE)
+            
+            if not pdf_mentions:
+                return response
+                
+            # Проверяем наличие изображений для упомянутых PDF
+            img_dir = Path('./data/images')
+            if not img_dir.exists():
+                return response
+                
+            # Ищем изображения, соответствующие упомянутым PDF
+            added_images = []
+            images_metadata = {}
+            
+            for pdf_name in pdf_mentions:
+                # Нормализуем имя PDF (убираем расширение, если есть)
+                pdf_stem = pdf_name.split('.')[0].strip().lower()
+                
+                # Ищем изображения, соответствующие этому PDF
+                matching_images = list(img_dir.glob(f"{pdf_stem}*.jpeg")) + list(img_dir.glob(f"{pdf_stem}*.jpg")) + list(img_dir.glob(f"{pdf_stem}*.png"))
+                
+                # Берем до 3 изображений для каждого PDF
+                for img_path in matching_images[:3]:
+                    if str(img_path) not in added_images:
+                        # Добавляем тег изображения в текст
+                        img_tag = f"\n\n![Изображение из документа {pdf_name}]({img_path})\n"
+                        response += img_tag
+                        added_images.append(str(img_path))
+                        
+                        # Сохраняем метаданные об изображениях
+                        if pdf_stem not in images_metadata:
+                            images_metadata[pdf_stem] = []
+                        images_metadata[pdf_stem].append(str(img_path))
+            
+            # Добавляем метаданные об изображениях в комментарий
+            if images_metadata:
+                response += f"\n\n<!-- IMAGES: {json.dumps(images_metadata, ensure_ascii=False)} -->"
+                
+            return response
+        except Exception as e:
+            logger.error(f"Ошибка при улучшении ответа изображениями: {e}")
+            return response
     
     async def reset_user_thread(self, user_id: int) -> None:
         """Сбрасывает тред пользователя, создавая новый"""

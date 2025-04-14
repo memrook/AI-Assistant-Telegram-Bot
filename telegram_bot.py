@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import re
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -274,10 +275,78 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_message.edit_text(f"❌ Произошла ошибка при пересоздании индекса: {str(e)[:100]}...")
 
 
+# Функции для обработки изображений
+def extract_image_tags(text):
+    """Извлекает теги с изображениями из текста ответа"""
+    # Ищем специальные теги изображений в формате ![описание](путь_к_файлу)
+    image_pattern = r'!\[(.*?)\]\((.*?)\)'
+    image_tags = re.findall(image_pattern, text)
+    return image_tags
+
+def remove_image_tags(text):
+    """Удаляет теги изображений из текста"""
+    # Заменяем теги изображений на пустую строку
+    clean_text = re.sub(r'!\[(.*?)\]\((.*?)\)', '', text)
+    # Убираем двойные переносы строк, которые могли появиться
+    clean_text = re.sub(r'\n\s*\n\s*\n', '\n\n', clean_text)
+    return clean_text
+
+def extract_image_metadata(text):
+    """Извлекает метаданные об изображениях из комментария в Markdown"""
+    try:
+        # Ищем комментарий с метаданными об изображениях
+        metadata_match = re.search(r'<!-- IMAGES: (.*?) -->', text)
+        if metadata_match:
+            import json
+            # Преобразуем JSON в объект Python
+            metadata_str = metadata_match.group(1)
+            metadata = json.loads(metadata_str)
+            return metadata
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка при извлечении метаданных изображений: {e}")
+        return None
+
+async def send_images_from_metadata(metadata, chat_id, context):
+    """Отправляет изображения из метаданных в чат"""
+    sent_images = 0
+    try:
+        # Проверяем структуру метаданных
+        if not metadata:
+            return 0
+            
+        for pdf_name, images in metadata.items():
+            # Если images это словарь, берем только пути
+            if isinstance(images, dict):
+                image_paths = list(images.values())
+            else:
+                image_paths = images
+                
+            # Отправляем каждое изображение
+            for img_path in image_paths:
+                if os.path.exists(img_path):
+                    try:
+                        with open(img_path, 'rb') as img_file:
+                            await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=img_file,
+                                caption=f"Изображение из документа: {pdf_name}"
+                            )
+                        sent_images += 1
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке изображения {img_path}: {e}")
+                else:
+                    logger.warning(f"Изображение не найдено: {img_path}")
+                    
+        return sent_images
+    except Exception as e:
+        logger.error(f"Ошибка при отправке изображений: {e}")
+        return sent_images
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
     # Если бот еще не инициализирован, запускаем инициализацию
-    global session_manager
+    global session_manager, pdf_processor
     if not session_manager:
         await update.message.reply_text(
             "Начинаю инициализацию бота. Это может занять некоторое время..."
@@ -291,6 +360,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_id = update.effective_user.id
     user_message = update.message.text
+    chat_id = update.effective_chat.id
 
     # Отправляем сообщение о том, что бот обрабатывает запрос
     processing_message = await update.message.reply_text("Обрабатываю ваш запрос...")
@@ -298,9 +368,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         # Получаем ответ от ассистента
         response = await session_manager.send_message(user_id, user_message)
-
-        # Отправляем ответ пользователю
-        await processing_message.edit_text(response)
+        
+        # Проверяем, есть ли в ответе теги с изображениями
+        image_tags = extract_image_tags(response)
+        
+        # Извлекаем метаданные об изображениях
+        metadata = extract_image_metadata(response)
+        
+        # Удаляем теги изображений и метаданные из текста
+        clean_response = remove_image_tags(response)
+        if metadata:
+            clean_response = re.sub(r'<!-- IMAGES: .*? -->', '', clean_response)
+            clean_response = re.sub(r'\n\s*\n\s*\n', '\n\n', clean_response)
+        
+        # Отправляем текстовый ответ
+        await processing_message.edit_text(clean_response)
+        
+        # Отправляем изображения, если они есть
+        images_count = 0
+        
+        # Сначала обрабатываем теги изображений
+        if image_tags:
+            for alt_text, img_path in image_tags:
+                if os.path.exists(img_path):
+                    try:
+                        with open(img_path, 'rb') as img_file:
+                            await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=img_file,
+                                caption=alt_text if alt_text else "Изображение"
+                            )
+                        images_count += 1
+                    except Exception as e:
+                        logger.error(f"Ошибка при отправке изображения {img_path}: {e}")
+        
+        # Затем обрабатываем метаданные изображений
+        if metadata:
+            sent = await send_images_from_metadata(metadata, chat_id, context)
+            images_count += sent
+            
+        # Если были отправлены изображения, отправляем статистику
+        if images_count > 0:
+            await update.message.reply_text(f"📸 Отправлено изображений: {images_count}")
+            
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         await processing_message.edit_text(
