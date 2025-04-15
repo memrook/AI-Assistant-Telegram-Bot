@@ -1,9 +1,8 @@
 import os
 import logging
 import asyncio
-import re
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -76,7 +75,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/status - Получить статус обработки документов\n"
         "/cancel - Отменить текущую обработку документов\n"
         "/history - Показать историю разговора\n"
-        "/reindex - Принудительно пересоздать поисковый индекс"
+        "/reindex - Принудительно пересоздать поисковый индекс\n"
+        "/extract_images <имя_файла> - Извлечь изображения из PDF (например: /extract_images example.pdf)"
     )
 
 
@@ -275,73 +275,131 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_message.edit_text(f"❌ Произошла ошибка при пересоздании индекса: {str(e)[:100]}...")
 
 
-# Функции для обработки изображений
-def extract_image_tags(text):
-    """Извлекает теги с изображениями из текста ответа"""
-    # Ищем специальные теги изображений в формате ![описание](путь_к_файлу)
-    image_pattern = r'!\[(.*?)\]\((.*?)\)'
-    image_tags = re.findall(image_pattern, text)
-    return image_tags
-
-def remove_image_tags(text):
-    """Удаляет теги изображений из текста"""
-    # Заменяем теги изображений на пустую строку
-    clean_text = re.sub(r'!\[(.*?)\]\((.*?)\)', '', text)
-    # Убираем двойные переносы строк, которые могли появиться
-    clean_text = re.sub(r'\n\s*\n\s*\n', '\n\n', clean_text)
-    return clean_text
-
-def extract_image_metadata(text):
-    """Извлекает метаданные об изображениях из комментария в Markdown"""
+async def extract_images_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /extract_images - извлекает изображения из PDF и отправляет их в чат"""
+    global pdf_processor
+    
+    if not pdf_processor:
+        await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
+        return
+    
+    # Проверяем, что процессор не занят
+    if hasattr(pdf_processor, 'is_processing') and pdf_processor.is_processing:
+        await update.message.reply_text(
+            "⚠️ В данный момент уже выполняется обработка документов. Дождитесь окончания или используйте /cancel для отмены."
+        )
+        return
+    
+    # Проверяем, что указано имя файла
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text(
+            "❌ Не указано имя PDF-файла. Пример использования: /extract_images example.pdf"
+        )
+        return
+    
+    filename = context.args[0]
+    docs_dir = "./data/docs"
+    pdf_path = os.path.join(docs_dir, filename)
+    
+    # Проверяем существование файла
+    if not os.path.exists(pdf_path):
+        await update.message.reply_text(
+            f"❌ Файл {filename} не найден в директории {docs_dir}. "
+            f"Убедитесь, что файл существует и попробуйте снова."
+        )
+        return
+    
+    # Отправляем сообщение о начале процесса
+    progress_message = await update.message.reply_text(
+        f"🔄 Начинаю извлечение изображений из файла {filename}..."
+    )
+    
     try:
-        # Ищем комментарий с метаданными об изображениях
-        metadata_match = re.search(r'<!-- IMAGES: (.*?) -->', text)
-        if metadata_match:
-            import json
-            # Преобразуем JSON в объект Python
-            metadata_str = metadata_match.group(1)
-            metadata = json.loads(metadata_str)
-            return metadata
-        return None
-    except Exception as e:
-        logger.error(f"Ошибка при извлечении метаданных изображений: {e}")
-        return None
-
-async def send_images_from_metadata(metadata, chat_id, context):
-    """Отправляет изображения из метаданных в чат"""
-    sent_images = 0
-    try:
-        # Проверяем структуру метаданных
-        if not metadata:
-            return 0
+        # Извлекаем изображения из PDF
+        pdf_processor.is_processing = True
+        images_info = await pdf_processor.extract_images_from_pdf(pdf_path)
+        pdf_processor.is_processing = False
+        
+        if not images_info:
+            await progress_message.edit_text(
+                f"❌ Не удалось извлечь изображения из файла {filename}."
+            )
+            return
+        
+        # Сохраняем информацию об изображениях в контексте чата для использования в обработчике обычных сообщений
+        context.chat_data["last_extracted_images"] = images_info
+        
+        # Отправляем информацию о результатах
+        result_message = (
+            f"✅ Успешно извлечены изображения из файла {filename}:\n"
+            f"📄 Страниц: {len(images_info['pages'])}\n"
+            f"📊 Таблиц: {len(images_info['tables'])}\n"
+            f"🖼 Рисунков: {len(images_info['pictures'])}\n\n"
+            f"Отправляю изображения..."
+        )
+        await progress_message.edit_text(result_message)
+        
+        # Отправляем изображения в чат (максимум 10, чтобы не спамить)
+        MAX_IMAGES = 10
+        sent_images = 0
+        
+        # Отправляем изображения страниц (не более MAX_IMAGES/3)
+        max_pages = min(len(images_info['pages']), MAX_IMAGES // 3)
+        for i in range(max_pages):
+            page_info = images_info['pages'][i]
+            with open(page_info['file_path'], 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=f"📄 Страница {page_info['page_no']} из документа {images_info['document_name']}"
+                )
+            sent_images += 1
+        
+        # Отправляем изображения таблиц (не более MAX_IMAGES/3)
+        max_tables = min(len(images_info['tables']), MAX_IMAGES // 3)
+        for i in range(max_tables):
+            table_info = images_info['tables'][i]
+            with open(table_info['file_path'], 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=f"📊 Таблица {table_info['table_no']} из документа {images_info['document_name']}"
+                )
+            sent_images += 1
+        
+        # Отправляем изображения рисунков (оставшиеся слоты до MAX_IMAGES)
+        remaining_slots = MAX_IMAGES - sent_images
+        max_pictures = min(len(images_info['pictures']), remaining_slots)
+        for i in range(max_pictures):
+            picture_info = images_info['pictures'][i]
+            with open(picture_info['file_path'], 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=f"🖼 Рисунок {picture_info['picture_no']} из документа {images_info['document_name']}"
+                )
+            sent_images += 1
+        
+        # Если есть неотправленные изображения, сообщаем об этом
+        total_images = len(images_info['pages']) + len(images_info['tables']) + len(images_info['pictures'])
+        if total_images > MAX_IMAGES:
+            await update.message.reply_text(
+                f"⚠️ Показано {sent_images} из {total_images} изображений. "
+                f"Все изображения сохранены в директории data/images."
+            )
             
-        for pdf_name, images in metadata.items():
-            # Если images это словарь, берем только пути
-            if isinstance(images, dict):
-                image_paths = list(images.values())
-            else:
-                image_paths = images
-                
-            # Отправляем каждое изображение
-            for img_path in image_paths:
-                if os.path.exists(img_path):
-                    try:
-                        with open(img_path, 'rb') as img_file:
-                            await context.bot.send_photo(
-                                chat_id=chat_id,
-                                photo=img_file,
-                                caption=f"Изображение из документа: {pdf_name}"
-                            )
-                        sent_images += 1
-                    except Exception as e:
-                        logger.error(f"Ошибка при отправке изображения {img_path}: {e}")
-                else:
-                    logger.warning(f"Изображение не найдено: {img_path}")
-                    
-        return sent_images
+        # Отправляем файл Markdown с внешними ссылками на изображения
+        if images_info['markdown']:
+            with open(images_info['markdown'], 'rb') as doc_file:
+                await update.message.reply_document(
+                    document=doc_file,
+                    caption=f"📝 Markdown-документ с внешними ссылками на изображения"
+                )
+    
     except Exception as e:
-        logger.error(f"Ошибка при отправке изображений: {e}")
-        return sent_images
+        logger.error(f"Ошибка при извлечении изображений: {e}")
+        await progress_message.edit_text(
+            f"❌ Произошла ошибка при извлечении изображений: {str(e)[:100]}..."
+        )
+        pdf_processor.is_processing = False
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
@@ -360,57 +418,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_id = update.effective_user.id
     user_message = update.message.text
-    chat_id = update.effective_chat.id
 
     # Отправляем сообщение о том, что бот обрабатывает запрос
     processing_message = await update.message.reply_text("Обрабатываю ваш запрос...")
 
     try:
-        # Получаем ответ от ассистента
-        response = await session_manager.send_message(user_id, user_message)
+        # Проверяем, есть ли у нас активные изображения из PDF
+        images_info = context.chat_data.get("last_extracted_images")
         
-        # Проверяем, есть ли в ответе теги с изображениями
-        image_tags = extract_image_tags(response)
-        
-        # Извлекаем метаданные об изображениях
-        metadata = extract_image_metadata(response)
-        
-        # Удаляем теги изображений и метаданные из текста
-        clean_response = remove_image_tags(response)
-        if metadata:
-            clean_response = re.sub(r'<!-- IMAGES: .*? -->', '', clean_response)
-            clean_response = re.sub(r'\n\s*\n\s*\n', '\n\n', clean_response)
-        
-        # Отправляем текстовый ответ
-        await processing_message.edit_text(clean_response)
-        
-        # Отправляем изображения, если они есть
-        images_count = 0
-        
-        # Сначала обрабатываем теги изображений
-        if image_tags:
-            for alt_text, img_path in image_tags:
-                if os.path.exists(img_path):
-                    try:
-                        with open(img_path, 'rb') as img_file:
-                            await context.bot.send_photo(
-                                chat_id=chat_id,
-                                photo=img_file,
-                                caption=alt_text if alt_text else "Изображение"
-                            )
-                        images_count += 1
-                    except Exception as e:
-                        logger.error(f"Ошибка при отправке изображения {img_path}: {e}")
-        
-        # Затем обрабатываем метаданные изображений
-        if metadata:
-            sent = await send_images_from_metadata(metadata, chat_id, context)
-            images_count += sent
+        if images_info:
+            # Используем режим с изображениями
+            result = await session_manager.send_message_with_images(user_id, user_message, images_info)
+            response = result["response"]
+            relevant_images = result["relevant_images"]
             
-        # Если были отправлены изображения, отправляем статистику
-        if images_count > 0:
-            await update.message.reply_text(f"📸 Отправлено изображений: {images_count}")
+            # Отправляем ответ пользователю
+            await processing_message.edit_text(response)
             
+            # Отправляем релевантные изображения, если они есть
+            if relevant_images:
+                # Подготавливаем текст для сообщения с изображениями
+                images_text = "Вот релевантные изображения к моему ответу:"
+                
+                # Отправляем изображения страниц
+                for page_info in relevant_images.get("pages", []):
+                    with open(page_info['file_path'], 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=f"📄 Страница {page_info['page_no']} из документа {images_info['document_name']}"
+                        )
+                
+                # Отправляем изображения таблиц
+                for table_info in relevant_images.get("tables", []):
+                    with open(table_info['file_path'], 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=f"📊 Таблица {table_info['table_no']} из документа {images_info['document_name']}"
+                        )
+                
+                # Отправляем изображения рисунков
+                for picture_info in relevant_images.get("pictures", []):
+                    with open(picture_info['file_path'], 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=f"🖼 Рисунок {picture_info['picture_no']} из документа {images_info['document_name']}"
+                        )
+        else:
+            # Обычный режим без изображений
+            response = await session_manager.send_message(user_id, user_message)
+            await processing_message.edit_text(response)
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         await processing_message.edit_text(
@@ -607,6 +663,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("reindex", reindex_command))
+    application.add_handler(CommandHandler("extract_images", extract_images_command))
 
     # Регистрация обработчика текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

@@ -1,12 +1,11 @@
 import logging
 import json
-import re
-import os
-from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk._assistants.assistant import Assistant
 from yandex_cloud_ml_sdk._threads.thread import Thread
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +16,7 @@ class SessionManager:
         self.sdk = sdk
         self.assistant = assistant
         self.user_threads: Dict[int, Thread] = {}
-        self.message_history: Dict[int, List[Dict]] = {}  # Хранение истории сообщений для каждого пользователя
+        self.conversation_history: Dict[int, List[Dict]] = {}  # Хранение истории сообщений для каждого пользователя
         
     async def get_user_thread(self, user_id: int) -> Thread:
         """Получает тред пользователя или создает новый, если тред не существует"""
@@ -26,24 +25,24 @@ class SessionManager:
             thread = self.sdk.threads.create()
             self.user_threads[user_id] = thread
             # Инициализируем историю сообщений для нового пользователя
-            self.message_history[user_id] = []
+            self.conversation_history[user_id] = []
             return thread
         
         return self.user_threads[user_id]
         
     def _add_to_history(self, user_id: int, role: str, content: str):
         """Добавляет сообщение в историю пользователя"""
-        if user_id not in self.message_history:
-            self.message_history[user_id] = []
+        if user_id not in self.conversation_history:
+            self.conversation_history[user_id] = []
             
-        self.message_history[user_id].append({
+        self.conversation_history[user_id].append({
             "role": role,
             "content": content
         })
         
         # Ограничиваем историю последними 20 сообщениями
-        if len(self.message_history[user_id]) > 20:
-            self.message_history[user_id] = self.message_history[user_id][-20:]
+        if len(self.conversation_history[user_id]) > 20:
+            self.conversation_history[user_id] = self.conversation_history[user_id][-20:]
     
     async def send_message(self, user_id: int, message: str) -> str:
         """Отправляет сообщение в тред пользователя и получает ответ от ассистента"""
@@ -103,9 +102,9 @@ class SessionManager:
                             logger.warning(f"Не удалось использовать run_with_options: {e2}")
                 
                     # Вариант 3: run с передачей истории сообщений напрямую
-                    if run is None and hasattr(self.assistant, 'run') and len(self.message_history.get(user_id, [])) > 0:
+                    if run is None and hasattr(self.assistant, 'run') and len(self.conversation_history.get(user_id, [])) > 0:
                         try:
-                            messages = self.message_history[user_id]
+                            messages = self.conversation_history[user_id]
                             run = self.assistant.run(thread, messages=messages)
                             logger.info(f"Запущен с явной передачей {len(messages)} сообщений из истории")
                         except Exception as e3:
@@ -170,63 +169,11 @@ class SessionManager:
                 response = result.content
             else:
                 response = "Получен пустой ответ от ассистента."
-            
-            # Проверяем, есть ли упоминания изображений в ответе и добавляем теги изображений
-            response = self._enhance_response_with_images(response)
                 
             return response
         except Exception as e:
             logger.error(f"Ошибка при форматировании ответа: {e}")
             return "Ошибка форматирования ответа ассистента."
-    
-    def _enhance_response_with_images(self, response):
-        """Улучшает ответ, добавляя ссылки на изображения, если они упоминаются"""
-        try:
-            # Ищем упоминания PDF файлов
-            pdf_mentions = re.findall(r'документ[а-яё\s]*[«"\'](.*?)[»"\']', response, re.IGNORECASE)
-            pdf_mentions += re.findall(r'файл[а-яё\s]*[«"\'](.*?)[»"\']', response, re.IGNORECASE)
-            pdf_mentions += re.findall(r'из[а-яё\s]*[«"\'](.*?)[»"\']', response, re.IGNORECASE)
-            
-            if not pdf_mentions:
-                return response
-                
-            # Проверяем наличие изображений для упомянутых PDF
-            img_dir = Path('./data/images')
-            if not img_dir.exists():
-                return response
-                
-            # Ищем изображения, соответствующие упомянутым PDF
-            added_images = []
-            images_metadata = {}
-            
-            for pdf_name in pdf_mentions:
-                # Нормализуем имя PDF (убираем расширение, если есть)
-                pdf_stem = pdf_name.split('.')[0].strip().lower()
-                
-                # Ищем изображения, соответствующие этому PDF
-                matching_images = list(img_dir.glob(f"{pdf_stem}*.jpeg")) + list(img_dir.glob(f"{pdf_stem}*.jpg")) + list(img_dir.glob(f"{pdf_stem}*.png"))
-                
-                # Берем до 3 изображений для каждого PDF
-                for img_path in matching_images[:3]:
-                    if str(img_path) not in added_images:
-                        # Добавляем тег изображения в текст
-                        img_tag = f"\n\n![Изображение из документа {pdf_name}]({img_path})\n"
-                        response += img_tag
-                        added_images.append(str(img_path))
-                        
-                        # Сохраняем метаданные об изображениях
-                        if pdf_stem not in images_metadata:
-                            images_metadata[pdf_stem] = []
-                        images_metadata[pdf_stem].append(str(img_path))
-            
-            # Добавляем метаданные об изображениях в комментарий
-            if images_metadata:
-                response += f"\n\n<!-- IMAGES: {json.dumps(images_metadata, ensure_ascii=False)} -->"
-                
-            return response
-        except Exception as e:
-            logger.error(f"Ошибка при улучшении ответа изображениями: {e}")
-            return response
     
     async def reset_user_thread(self, user_id: int) -> None:
         """Сбрасывает тред пользователя, создавая новый"""
@@ -235,16 +182,117 @@ class SessionManager:
             thread = self.sdk.threads.create()
             self.user_threads[user_id] = thread
             # Также сбрасываем историю сообщений
-            self.message_history[user_id] = []
+            self.conversation_history[user_id] = []
             
     def get_conversation_history(self, user_id: int) -> str:
         """Возвращает историю разговора пользователя в читаемом формате"""
-        if user_id not in self.message_history or not self.message_history[user_id]:
+        if user_id not in self.conversation_history or not self.conversation_history[user_id]:
             return "История разговора пуста."
             
         formatted_history = []
-        for message in self.message_history[user_id]:
+        for message in self.conversation_history[user_id]:
             role = "👤 Вы" if message["role"] == "user" else "🤖 Ассистент"
             formatted_history.append(f"{role}: {message['content']}")
             
-        return "\n\n".join(formatted_history) 
+        return "\n\n".join(formatted_history)
+
+    async def send_message_with_images(self, user_id: int, message: str, images_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Отправляет сообщение ассистенту вместе с информацией об изображениях и получает ответ
+        
+        Args:
+            user_id: ID пользователя
+            message: Текст сообщения
+            images_info: Информация об изображениях из PDF
+            
+        Returns:
+            Dict: Словарь с ответом и рекомендуемыми изображениями
+        """
+        # Получаем или создаем тред для пользователя
+        thread = self._get_or_create_thread(user_id)
+        
+        # Добавляем сообщение пользователя в историю
+        if user_id not in self.conversation_history:
+            self.conversation_history[user_id] = []
+        
+        # Если есть информация об изображениях, добавляем её к сообщению
+        message_with_context = message
+        if images_info:
+            message_with_context += f"\n\nДоступны изображения из документа {images_info['document_name']}:"
+            if images_info['pages']:
+                message_with_context += f"\n- {len(images_info['pages'])} страниц"
+            if images_info['tables']:
+                message_with_context += f"\n- {len(images_info['tables'])} таблиц"
+            if images_info['pictures']:
+                message_with_context += f"\n- {len(images_info['pictures'])} рисунков"
+        
+        self.conversation_history[user_id].append({"role": "user", "content": message})
+        
+        # Отправляем сообщение ассистенту
+        try:
+            response = thread.send_message(message_with_context)
+            assistant_response = response.content
+            
+            # Добавляем ответ ассистента в историю
+            self.conversation_history[user_id].append({"role": "assistant", "content": assistant_response})
+            
+            # Проанализируем ответ и определим, какие изображения могут быть полезны
+            relevant_images = {}
+            if images_info:
+                relevant_images = self._find_relevant_images(assistant_response, images_info)
+            
+            return {
+                "response": assistant_response,
+                "relevant_images": relevant_images
+            }
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения ассистенту: {e}")
+            return {
+                "response": f"Произошла ошибка: {str(e)}",
+                "relevant_images": {}
+            }
+    
+    def _find_relevant_images(self, response: str, images_info: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Определяет, какие изображения могут быть релевантны для ответа
+        
+        Args:
+            response: Ответ ассистента
+            images_info: Информация об изображениях из PDF
+            
+        Returns:
+            Dict: Словарь с релевантными изображениями
+        """
+        relevant_images = {
+            "pages": [],
+            "tables": [],
+            "pictures": []
+        }
+        
+        # Простая эвристика: если в ответе упоминается слово "таблица", добавим первые 2 таблицы
+        if "таблиц" in response.lower() and images_info["tables"]:
+            relevant_images["tables"] = images_info["tables"][:2]
+        
+        # Если упоминается "рисунок", "диаграмма" и т.д., добавим рисунки
+        if any(word in response.lower() for word in ["рисунок", "изображени", "диаграмм", "граф"]) and images_info["pictures"]:
+            relevant_images["pictures"] = images_info["pictures"][:2]
+        
+        # Если упоминается "страница", добавим страницы
+        if "страниц" in response.lower() and images_info["pages"]:
+            relevant_images["pages"] = images_info["pages"][:1]
+        
+        # Если ничего не нашли, добавим первую страницу как наиболее релевантную
+        if (not relevant_images["pages"] and not relevant_images["tables"] and not relevant_images["pictures"] 
+                and images_info["pages"]):
+            relevant_images["pages"] = images_info["pages"][:1]
+            
+        return relevant_images
+
+    def _get_or_create_thread(self, user_id: int):
+        """Получает или создает тред для пользователя"""
+        if user_id not in self.user_threads:
+            # Создаем новый тред
+            self.user_threads[user_id] = self.sdk.threads.create(self.assistant)
+            logger.info(f"Создан новый тред для пользователя {user_id}")
+        
+        return self.user_threads[user_id] 
