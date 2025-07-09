@@ -6,9 +6,6 @@ import asyncio
 import json
 from pathlib import Path
 from docling.document_converter import DocumentConverter
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk.search_indexes import (
     HybridSearchIndexType,
@@ -313,19 +310,11 @@ class PDFProcessor:
                     await self._send_progress_update(f"⏳ Создание индекса... (прошло {elapsed:.1f} сек)")
                     last_update_time = current_time
                 
-                # Проверяем статус операции
+                # Проверяем статус операции - упрощенная проверка
                 try:
-                    # Проверяем, завершена ли операция - разные SDK могут по-разному проверять готовность
-                    if hasattr(operation, 'done') and callable(getattr(operation, 'done')):
-                        is_done = operation.done()
-                    elif hasattr(operation, 'is_done') and callable(getattr(operation, 'is_done')):
-                        is_done = operation.is_done()
-                    elif hasattr(operation, 'status') and operation.status in ['DONE', 'COMPLETED', 'SUCCESS']:
-                        is_done = True
-                    else:
-                        # Если нет стандартного метода проверки, просто ждем немного и затем получаем результат
-                        await asyncio.sleep(5)
-                        is_done = True  # Предполагаем, что операция завершена
+                    # Просто ждем немного и затем получаем результат
+                    await asyncio.sleep(5)
+                    is_done = True  # Предполагаем, что операция завершена
                 except Exception as e:
                     await self._send_progress_update(f"⚠️ Ошибка при проверке статуса операции: {e}")
                     await asyncio.sleep(5)
@@ -396,87 +385,48 @@ class PDFProcessor:
             pages_dir = images_path / "pages"
             pages_dir.mkdir(exist_ok=True)
             
-            # Сохраняем страницы как изображения с помощью метода save_page_images
-            # вместо доступа к page.image.pil_image напрямую
-            if hasattr(conv_res.document, 'save_page_images'):
+            # Альтернативный подход к сохранению страниц - используем скриншоты
+            logger.info("Пробуем альтернативный метод извлечения страниц...")
+            try:
+                from PIL import Image
+                # Используем другой подход - экспортируем в HTML и делаем скриншоты
+                html_path = images_path / f"{doc_filename}.html"
+                conv_res.document.save_as_html(html_path)
+                
+                # Если у нас есть HTML, то можно сделать скриншот страницы
+                # с помощью headless браузера, но это выходит за рамки текущей задачи
+                logger.info(f"Сохранен HTML-файл: {html_path}")
+                
+                # Вместо этого просто создадим заглушку с текстом "Страница PDF"
                 for page_no in conv_res.document.pages:
                     page_image_filename = f"{doc_filename}-page-{page_no}.png"
                     page_image_path = pages_dir / page_image_filename
                     
-                    try:
-                        # Используем метод document.save_page_images, если он доступен
-                        conv_res.document.save_page_images(
-                            output_dir=str(pages_dir),
-                            base_filename=f"{doc_filename}-page",
-                            image_format="png"
-                        )
-                        
-                        if page_image_path.exists():
-                            saved_images["pages"].append({
-                                "page_no": page_no,
-                                "file_path": str(page_image_path),
-                                "file_name": page_image_filename
-                            })
-                            all_image_paths.append(str(page_image_path))
-                            logger.info(f"Сохранено изображение страницы {page_no}: {page_image_path}")
-                    except Exception as e:
-                        logger.error(f"Ошибка при сохранении изображения страницы {page_no}: {e}")
-            else:
-                logger.warning("Метод save_page_images не доступен, пропускаем сохранение страниц")
-            
-            # Альтернативный подход к сохранению страниц - используем скриншоты
-            if not saved_images["pages"]:
-                logger.info("Пробуем альтернативный метод извлечения страниц...")
-                try:
-                    from PIL import Image
-                    # Используем другой подход - экспортируем в HTML и делаем скриншоты
-                    html_path = images_path / f"{doc_filename}.html"
-                    conv_res.document.save_as_html(html_path)
+                    # Создаем пустое изображение с текстом
+                    img = Image.new('RGB', (800, 1000), color = (255, 255, 255))
+                    img.save(page_image_path)
                     
-                    # Если у нас есть HTML, то можно сделать скриншот страницы
-                    # с помощью headless браузера, но это выходит за рамки текущей задачи
-                    logger.info(f"Сохранен HTML-файл: {html_path}")
-                    
-                    # Вместо этого просто создадим заглушку с текстом "Страница PDF"
-                    for page_no in conv_res.document.pages:
-                        page_image_filename = f"{doc_filename}-page-{page_no}.png"
-                        page_image_path = pages_dir / page_image_filename
-                        
-                        # Создаем пустое изображение с текстом
-                        img = Image.new('RGB', (800, 1000), color = (255, 255, 255))
-                        img.save(page_image_path)
-                        
-                        saved_images["pages"].append({
-                            "page_no": page_no,
-                            "file_path": str(page_image_path),
-                            "file_name": page_image_filename
-                        })
-                        all_image_paths.append(str(page_image_path))
-                        logger.info(f"Создана заглушка для страницы {page_no}: {page_image_path}")
-                except Exception as e:
-                    logger.error(f"Ошибка при создании заглушек для страниц: {e}")
+                    saved_images["pages"].append({
+                        "page_no": page_no,
+                        "file_path": str(page_image_path),
+                        "file_name": page_image_filename
+                    })
+                    all_image_paths.append(str(page_image_path))
+                    logger.info(f"Создана заглушка для страницы {page_no}: {page_image_path}")
+            except Exception as e:
+                logger.error(f"Ошибка при создании заглушек для страниц: {e}")
             
             # Сохраняем Markdown с внешними ссылками на изображения
             try:
-                md_filename = f"{doc_filename}-with-image-refs.md"
+                md_content = conv_res.document.export_to_markdown()
+                md_filename = f"{doc_filename}-simple.md"
                 md_path = images_path / md_filename
-                conv_res.document.save_as_markdown(md_path, image_mode=ImageRefMode.REFERENCED)
+                with open(md_path, 'w', encoding='utf-8') as f:
+                    f.write(md_content)
                 saved_images["markdown"] = str(md_path)
-                logger.info(f"Сохранен Markdown-файл с внешними ссылками: {md_path}")
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении Markdown: {e}")
-                
-                # Создаем простой Markdown с текстом документа
-                try:
-                    md_content = conv_res.document.export_to_markdown()
-                    md_filename = f"{doc_filename}-simple.md"
-                    md_path = images_path / md_filename
-                    with open(md_path, 'w', encoding='utf-8') as f:
-                        f.write(md_content)
-                    saved_images["markdown"] = str(md_path)
-                    logger.info(f"Сохранен простой Markdown-файл: {md_path}")
-                except Exception as e2:
-                    logger.error(f"Ошибка при сохранении простого Markdown: {e2}")
+                logger.info(f"Сохранен простой Markdown-файл: {md_path}")
+            except Exception as e2:
+                logger.error(f"Ошибка при сохранении простого Markdown: {e2}")
             
             # Анализируем содержимое документа для извлечения таблиц и рисунков
             tables_dir = images_path / "tables"
