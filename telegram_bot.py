@@ -17,7 +17,7 @@ from yandex_cloud_ml_sdk.search_indexes import (
     ReciprocalRankFusionIndexCombinationStrategy,
 )
 
-from pdf_converter import PDFProcessor
+from document_processor import DocumentProcessor
 from session_manager import SessionManager
 
 # Настройка логирования
@@ -40,7 +40,7 @@ DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.5"))
 sdk = None
 session_manager = None
 initialization_message = None
-pdf_processor = None
+document_processor = None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -72,11 +72,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start - Начать общение с ботом\n"
         "/help - Показать справку\n"
         "/reset - Сбросить историю разговора\n"
-        "/status - Получить статус обработки документов\n"
-        "/cancel - Отменить текущую обработку документов\n"
+        "/status - Получить статус загрузки документов\n"
+        "/cancel - Отменить текущую загрузку документов\n"
         "/history - Показать историю разговора\n"
-        "/reindex - Принудительно пересоздать поисковый индекс\n"
-        "/extract_images <имя_файла> - Извлечь изображения из PDF (например: /extract_images example.pdf)"
+        "/reindex - Принудительно пересоздать поисковый индекс"
     )
 
 
@@ -103,20 +102,20 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /cancel - отменяет текущую обработку документов"""
-    global pdf_processor
+    """Обработчик команды /cancel - отменяет текущую загрузку документов"""
+    global document_processor
 
-    if not 'pdf_processor' in globals() or pdf_processor is None:
-        await update.message.reply_text("⚠️ Нет активного процесса обработки документов.")
+    if not 'document_processor' in globals() or document_processor is None:
+        await update.message.reply_text("⚠️ Нет активного процесса загрузки документов.")
         return
 
-    if hasattr(pdf_processor, 'is_processing') and pdf_processor.is_processing:
+    if hasattr(document_processor, 'is_processing') and document_processor.is_processing:
         # Устанавливаем флаг отмены
-        pdf_processor.is_processing = False
+        document_processor.is_processing = False
         await update.message.reply_text(
-            "🛑 Обработка документов прервана. Обработка текущего документа будет завершена.")
+            "🛑 Загрузка документов прервана. Загрузка текущего документа будет завершена.")
     else:
-        await update.message.reply_text("⚠️ Нет активного процесса обработки документов.")
+        await update.message.reply_text("⚠️ Нет активного процесса загрузки документов.")
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -165,16 +164,16 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /reindex - принудительно пересоздает поисковый индекс"""
-    global pdf_processor, session_manager, initialization_message
+    global document_processor, session_manager, initialization_message
     
-    if not pdf_processor:
+    if not document_processor:
         await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
         return
     
     # Проверяем, что процессор не занят
-    if hasattr(pdf_processor, 'is_processing') and pdf_processor.is_processing:
+    if hasattr(document_processor, 'is_processing') and document_processor.is_processing:
         await update.message.reply_text(
-            "⚠️ В данный момент уже выполняется обработка документов. Дождитесь окончания или используйте /cancel для отмены."
+            "⚠️ В данный момент уже выполняется загрузка документов. Дождитесь окончания или используйте /cancel для отмены."
         )
         return
     
@@ -194,21 +193,21 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     progress_message = await progress_message.reply_text(message)
     
     # Устанавливаем callback для обновления сообщений
-    pdf_processor.update_callback = update_progress
+    document_processor.update_callback = update_progress
     
     try:
         # Сначала загружаем файлы, если они еще не загружены
-        if not pdf_processor.files:
-            await progress_message.edit_text("🔄 Загружаю файлы для создания индекса...")
-            files = await pdf_processor.convert_and_upload_pdfs()
+        if not document_processor.files:
+            await progress_message.edit_text("🔄 Загружаю Markdown-файлы для создания индекса...")
+            files = await document_processor.upload_markdown_files()
             if not files:
                 await progress_message.edit_text(
-                    "⚠️ Не удалось загрузить файлы для индексации. Проверьте наличие PDF-файлов в директории data/docs."
+                    "⚠️ Не удалось загрузить файлы для индексации. Проверьте наличие Markdown-файлов в директории data/md."
                 )
                 return
         
         # Пересоздаем индекс принудительно
-        search_index = await pdf_processor.create_search_index(force_recreate=True)
+        search_index = await document_processor.create_search_index(force_recreate=True)
         
         if not search_index:
             await progress_message.edit_text(
@@ -276,136 +275,11 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_message.edit_text(f"❌ Произошла ошибка при пересоздании индекса: {str(e)[:100]}...")
 
 
-async def extract_images_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /extract_images - извлекает изображения из PDF и отправляет их в чат"""
-    global pdf_processor
-    
-    if not pdf_processor:
-        await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
-        return
-    
-    # Проверяем, что процессор не занят
-    if hasattr(pdf_processor, 'is_processing') and pdf_processor.is_processing:
-        await update.message.reply_text(
-            "⚠️ В данный момент уже выполняется обработка документов. Дождитесь окончания или используйте /cancel для отмены."
-        )
-        return
-    
-    # Проверяем, что указано имя файла
-    if not context.args or len(context.args) < 1:
-        await update.message.reply_text(
-            "❌ Не указано имя PDF-файла. Пример использования: /extract_images example.pdf"
-        )
-        return
-    
-    filename = context.args[0]
-    docs_dir = "./data/docs"
-    pdf_path = os.path.join(docs_dir, filename)
-    
-    # Проверяем существование файла
-    if not os.path.exists(pdf_path):
-        await update.message.reply_text(
-            f"❌ Файл {filename} не найден в директории {docs_dir}. "
-            f"Убедитесь, что файл существует и попробуйте снова."
-        )
-        return
-    
-    # Отправляем сообщение о начале процесса
-    progress_message = await update.message.reply_text(
-        f"🔄 Начинаю извлечение изображений из файла {filename}..."
-    )
-    
-    try:
-        # Извлекаем изображения из PDF
-        pdf_processor.is_processing = True
-        images_info = await pdf_processor.extract_images_from_pdf(pdf_path)
-        pdf_processor.is_processing = False
-        
-        if not images_info:
-            await progress_message.edit_text(
-                f"❌ Не удалось извлечь изображения из файла {filename}."
-            )
-            return
-        
-        # Сохраняем информацию об изображениях в контексте чата для использования в обработчике обычных сообщений
-        context.chat_data["last_extracted_images"] = images_info
-        
-        # Отправляем информацию о результатах
-        result_message = (
-            f"✅ Успешно извлечены изображения из файла {filename}:\n"
-            f"📄 Страниц: {len(images_info['pages'])}\n"
-            f"📊 Таблиц: {len(images_info['tables'])}\n"
-            f"🖼 Рисунков: {len(images_info['pictures'])}\n\n"
-            f"Отправляю изображения..."
-        )
-        await progress_message.edit_text(result_message)
-        
-        # Отправляем изображения в чат (максимум 10, чтобы не спамить)
-        MAX_IMAGES = 10
-        sent_images = 0
-        
-        # Отправляем изображения страниц (не более MAX_IMAGES/3)
-        max_pages = min(len(images_info['pages']), MAX_IMAGES // 3)
-        for i in range(max_pages):
-            page_info = images_info['pages'][i]
-            with open(page_info['file_path'], 'rb') as photo:
-                await update.message.reply_photo(
-                    photo=photo,
-                    caption=f"📄 Страница {page_info['page_no']} из документа {images_info['document_name']}"
-                )
-            sent_images += 1
-        
-        # Отправляем изображения таблиц (не более MAX_IMAGES/3)
-        max_tables = min(len(images_info['tables']), MAX_IMAGES // 3)
-        for i in range(max_tables):
-            table_info = images_info['tables'][i]
-            with open(table_info['file_path'], 'rb') as photo:
-                await update.message.reply_photo(
-                    photo=photo,
-                    caption=f"📊 Таблица {table_info['table_no']} из документа {images_info['document_name']}"
-                )
-            sent_images += 1
-        
-        # Отправляем изображения рисунков (оставшиеся слоты до MAX_IMAGES)
-        remaining_slots = MAX_IMAGES - sent_images
-        max_pictures = min(len(images_info['pictures']), remaining_slots)
-        for i in range(max_pictures):
-            picture_info = images_info['pictures'][i]
-            with open(picture_info['file_path'], 'rb') as photo:
-                await update.message.reply_photo(
-                    photo=photo,
-                    caption=f"🖼 Рисунок {picture_info['picture_no']} из документа {images_info['document_name']}"
-                )
-            sent_images += 1
-        
-        # Если есть неотправленные изображения, сообщаем об этом
-        total_images = len(images_info['pages']) + len(images_info['tables']) + len(images_info['pictures'])
-        if total_images > MAX_IMAGES:
-            await update.message.reply_text(
-                f"⚠️ Показано {sent_images} из {total_images} изображений. "
-                f"Все изображения сохранены в директории data/images."
-            )
-            
-        # Отправляем файл Markdown с внешними ссылками на изображения
-        if images_info['markdown']:
-            with open(images_info['markdown'], 'rb') as doc_file:
-                await update.message.reply_document(
-                    document=doc_file,
-                    caption=f"📝 Markdown-документ с внешними ссылками на изображения"
-                )
-    
-    except Exception as e:
-        logger.error(f"Ошибка при извлечении изображений: {e}")
-        await progress_message.edit_text(
-            f"❌ Произошла ошибка при извлечении изображений: {str(e)[:100]}..."
-        )
-        pdf_processor.is_processing = False
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
     # Если бот еще не инициализирован, запускаем инициализацию
-    global session_manager, pdf_processor
+    global session_manager, document_processor
     if not session_manager:
         await update.message.reply_text(
             "Начинаю инициализацию бота. Это может занять некоторое время..."
@@ -424,50 +298,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     processing_message = await update.message.reply_text("Обрабатываю ваш запрос...")
 
     try:
-        # Проверяем, есть ли у нас активные изображения из PDF
-        images_info = context.chat_data.get("last_extracted_images")
-        
-        if images_info:
-            # Используем режим с изображениями
-            result = await session_manager.send_message_with_images(user_id, user_message, images_info)
-            response = result["response"]
-            relevant_images = result["relevant_images"]
-            
-            # Отправляем ответ пользователю
-            await processing_message.edit_text(response)
-            
-            # Отправляем релевантные изображения, если они есть
-            if relevant_images:
-                # Подготавливаем текст для сообщения с изображениями
-                images_text = "Вот релевантные изображения к моему ответу:"
-                
-                # Отправляем изображения страниц
-                for page_info in relevant_images.get("pages", []):
-                    with open(page_info['file_path'], 'rb') as photo:
-                        await update.message.reply_photo(
-                            photo=photo,
-                            caption=f"📄 Страница {page_info['page_no']} из документа {images_info['document_name']}"
-                        )
-                
-                # Отправляем изображения таблиц
-                for table_info in relevant_images.get("tables", []):
-                    with open(table_info['file_path'], 'rb') as photo:
-                        await update.message.reply_photo(
-                            photo=photo,
-                            caption=f"📊 Таблица {table_info['table_no']} из документа {images_info['document_name']}"
-                        )
-                
-                # Отправляем изображения рисунков
-                for picture_info in relevant_images.get("pictures", []):
-                    with open(picture_info['file_path'], 'rb') as photo:
-                        await update.message.reply_photo(
-                            photo=photo,
-                            caption=f"🖼 Рисунок {picture_info['picture_no']} из документа {images_info['document_name']}"
-                        )
-        else:
-            # Обычный режим без изображений
-            response = await session_manager.send_message(user_id, user_message)
-            await processing_message.edit_text(response)
+        # Обычный режим работы с документами
+        response = await session_manager.send_message(user_id, user_message)
+        await processing_message.edit_text(response)
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         await processing_message.edit_text(
@@ -477,7 +310,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def initialize_yandex_cloud(update: Update = None):
     """Инициализация Yandex Cloud SDK и создание ассистента"""
-    global sdk, session_manager, initialization_message, pdf_processor
+    global sdk, session_manager, initialization_message, document_processor
     
     progress_message = None
     if update:
@@ -501,13 +334,13 @@ async def initialize_yandex_cloud(update: Update = None):
                 if "message is too long" in str(e).lower() or "message is not modified" in str(e).lower():
                     progress_message = await progress_message.reply_text(message)
     
-    # Инициализация PDF процессора
-    logger.info("Инициализация PDF процессора")
-    pdf_processor = PDFProcessor(sdk, update_callback=update_progress)
+    # Инициализация процессора документов
+    logger.info("Инициализация процессора документов")
+    document_processor = DocumentProcessor(sdk, update_callback=update_progress)
     
     # Проверяем существование индекса
     search_index = None
-    existing_index = await pdf_processor.check_existing_index()
+    existing_index = await document_processor.check_existing_index()
     
     if existing_index:
         # Если существующий индекс найден, используем его
@@ -515,23 +348,23 @@ async def initialize_yandex_cloud(update: Update = None):
         if progress_message:
             await progress_message.edit_text(f"✅ Использую существующий поисковый индекс: {search_index.id}")
     else:
-        # Если индекс не найден, обрабатываем документы и создаем новый
+        # Если индекс не найден, загружаем документы и создаем новый
         if progress_message:
-            await progress_message.edit_text("Существующий индекс не найден. Начинаю обработку PDF-файлов...")
+            await progress_message.edit_text("Существующий индекс не найден. Начинаю загрузку Markdown-файлов...")
             
-        # Обработка документов
-        files = await pdf_processor.convert_and_upload_pdfs()
+        # Загрузка документов
+        files = await document_processor.upload_markdown_files()
         
         # Создание индекса
         if files:
-            search_index = await pdf_processor.create_search_index()
+            search_index = await document_processor.create_search_index()
             if not search_index and progress_message:
                 await progress_message.edit_text(
                     "⚠️ Не удалось создать поисковый индекс. Бот будет работать в режиме обычного ассистента."
                 )
         elif progress_message:
             await progress_message.edit_text(
-                "⚠️ Нет файлов для индексации. Бот будет работать в режиме обычного ассистента."
+                "⚠️ Нет файлов для индексации. Проверьте наличие Markdown-файлов в директории data/md. Бот будет работать в режиме обычного ассистента."
             )
     
     # Создание инструмента поиска
@@ -664,7 +497,6 @@ async def main() -> None:
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("reindex", reindex_command))
-    application.add_handler(CommandHandler("extract_images", extract_images_command))
 
     # Регистрация обработчика текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
