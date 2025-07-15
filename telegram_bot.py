@@ -1,8 +1,9 @@
-import os
-import logging
 import asyncio
+import logging
+import os
+
 from dotenv import load_dotenv
-from telegram import Update, InputFile
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -11,14 +12,12 @@ from telegram.ext import (
     filters,
 )
 from yandex_cloud_ml_sdk import YCloudML
-from yandex_cloud_ml_sdk.search_indexes import (
-    HybridSearchIndexType,
-    StaticIndexChunkingStrategy,
-    ReciprocalRankFusionIndexCombinationStrategy,
-)
 
 from document_processor import DocumentProcessor
 from session_manager import SessionManager
+
+# TODO Добавить функцию загрузки документов через Телеграм
+# TODO Добавить к ответам бота кнопку "Ответь подробнее" для более развернутого ответа
 
 # Настройка логирования
 logging.basicConfig(

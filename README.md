@@ -136,7 +136,7 @@ docker-compose exec ai-assistant-md bash
 
 - **Изоляция**: Приложение работает в изолированном контейнере
 - **Автоматический перезапуск**: Контейнер перезапускается при сбоях
-- **Ограничения ресурсов**: Настроены ограничения по памяти (1GB) и CPU (0.5 ядра)
+- **Ограничения ресурсов**: Настроены ограничения по памяти (1GB лимит, 512MB резерв) и CPU (0.5 ядра)
 - **Логирование**: Логи автоматически ротируются (максимум 3 файла по 10MB)
 - **Volumes**: Данные сохраняются между перезапусками контейнера
 - **Healthcheck**: Автоматическая проверка работоспособности контейнера
@@ -217,4 +217,25 @@ docker-compose exec ai-assistant-md bash
 - Ошибки при загрузке отдельных документов не прерывают обработку остальных
 - Возможность работы в режиме обычного ассистента без поиска, если создание индекса не удалось
 - Корректная обработка отмены операций и завершения приложения
-- Проверка существования директории с документами 
+- Проверка существования директории с документами
+
+## Решение возможных проблем
+
+### Docker проблемы
+
+**Ошибка "deploy sub-keys are not supported":**
+```
+ERROR: The following deploy sub-keys are not supported and have been ignored: resources.reservations.cpus
+```
+**Решение:** Обновите до последней версии docker-compose.yml. Мы используем совместимые параметры:
+- `mem_limit` вместо `deploy.resources.limits.memory`
+- `mem_reservation` вместо `deploy.resources.reservations.memory`  
+- `cpus` вместо `deploy.resources.limits.cpus`
+
+**Docker daemon не запущен:**
+```
+ERROR: Cannot connect to the Docker daemon
+```
+**Решение:** Запустите Docker Desktop или Docker service:
+- macOS/Windows: Запустите Docker Desktop
+- Linux: `sudo systemctl start docker` 

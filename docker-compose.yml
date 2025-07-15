@@ -19,15 +19,10 @@ services:
     ports:
       - "8000:8000"
     
-    # Ограничения ресурсов
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '0.5'
-        reservations:
-          memory: 512M
-          cpus: '0.25'
+    # Ограничения ресурсов (совместимо с docker-compose)
+    mem_limit: 1g
+    mem_reservation: 512m
+    cpus: 0.5
     
     # Проверка здоровья контейнера
     healthcheck:
