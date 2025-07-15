@@ -1,15 +1,14 @@
 # Используем официальный Python образ
 FROM python:3.11-slim
 
-# Устанавливаем системные зависимости
+# Устанавливаем только необходимые системные зависимости
+# gcc, g++ - для компиляции Python пакетов с C расширениями (lxml)
+# libxml2-dev, libxslt-dev - для работы python-docx с XML (DOCX файлы)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     libxml2-dev \
     libxslt-dev \
-    zlib1g-dev \
-    libjpeg-dev \
-    libpng-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Создаем пользователя для приложения (не root)
