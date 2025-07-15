@@ -1,5 +1,6 @@
 import logging
 import json
+import asyncio
 from typing import Dict, List
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk._assistants.assistant import Assistant
@@ -54,55 +55,91 @@ class SessionManager:
             thread.write(message)
             logger.info(f"Сообщение пользователя {user_id} записано в тред")
             
-            # Запускаем ассистента с использованием треда
+            # Запускаем ассистента с использованием треда с retry логикой
             logger.info(f"Запускаем ассистента для пользователя {user_id}")
             
-            try:
-                # Используем базовый запуск ассистента (совместимый с новой версией API)
-                run = self.assistant.run(thread)
-                logger.info("Запущен с базовыми параметрами")
+            result = await self._run_assistant_with_retry(thread, user_id)
+            
+            if result is None:
+                # Если результат None, значит произошла ошибка при выполнении
+                error_msg = "Ассистент не смог обработать ваш запрос. Попробуйте переформулировать вопрос или повторить позже."
+                self._add_to_history(user_id, "assistant", error_msg)
+                return error_msg
+            
+            # Формируем ответ из результата
+            response = self._format_response(result)
+            
+            if not response or response.strip() == "":
+                response = "Извините, не удалось получить ответ на ваш вопрос. Попробуйте переформулировать запрос."
+            
+            # Сохраняем ответ ассистента в истории
+            self._add_to_history(user_id, "assistant", response)
                 
-                # Ждем результат от ассистента с улучшенной обработкой ошибок
-                result = self._wait_for_result(run)
-                
-                if result is None:
-                    # Если результат None, значит произошла ошибка при выполнении
-                    error_msg = "Ассистент не смог обработать ваш запрос. Попробуйте переформулировать вопрос или повторить позже."
-                    self._add_to_history(user_id, "assistant", error_msg)
-                    return error_msg
-                
-                # Формируем ответ из результата
-                response = self._format_response(result)
-                
-                if not response or response.strip() == "":
-                    response = "Извините, не удалось получить ответ на ваш вопрос. Попробуйте переформулировать запрос."
-                
-                # Сохраняем ответ ассистента в истории
-                self._add_to_history(user_id, "assistant", response)
-                    
-                logger.info(f"Получен ответ для пользователя {user_id}")
-                return response
-                
-            except Exception as e:
-                error_msg = f"Ошибка при получении ответа от ассистента: {e}"
-                logger.error(error_msg)
-                
-                # Проверяем, содержит ли ошибка информацию о failed run
-                if "failed" in str(e).lower():
-                    user_error_msg = "Произошла ошибка при обработке запроса в AI модели. Попробуйте:"
-                    user_error_msg += "\n• Переформулировать вопрос"
-                    user_error_msg += "\n• Задать более простой вопрос"
-                    user_error_msg += "\n• Повторить запрос через некоторое время"
-                else:
-                    user_error_msg = f"Произошла техническая ошибка при обработке запроса. Попробуйте позже."
-                
-                self._add_to_history(user_id, "assistant", user_error_msg)
-                return user_error_msg
+            logger.info(f"Получен ответ для пользователя {user_id}")
+            return response
                 
         except Exception as e:
             error_msg = f"Ошибка при записи сообщения в тред: {e}"
             logger.error(error_msg)
             return f"Произошла ошибка при отправке сообщения: {str(e)}"
+    
+    async def _run_assistant_with_retry(self, thread, user_id: int, max_retries: int = 3):
+        """Запускает ассистента с retry логикой при ошибках FAILED статуса"""
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Попытка {attempt + 1}/{max_retries} запуска ассистента для пользователя {user_id}")
+                
+                # Используем базовый запуск ассистента (совместимый с новой версией API)
+                run = self.assistant.run(thread, custom_temperature=0.5, custom_max_tokens=1000)
+                logger.info(f"Run запущен (попытка {attempt + 1})")
+                
+                # Ждем результат от ассистента с улучшенной обработкой ошибок
+                result = self._wait_for_result(run)
+                
+                if result is not None:
+                    logger.info(f"Успешно получен результат на попытке {attempt + 1}")
+                    return result
+                else:
+                    logger.warning(f"Попытка {attempt + 1} вернула None результат")
+                    if attempt < max_retries - 1:
+                        # Делаем паузу перед следующей попыткой (экспоненциальная задержка)
+                        delay = 2 ** attempt  # 1s, 2s, 4s
+                        logger.info(f"Ожидаем {delay} секунд перед следующей попыткой...")
+                        await asyncio.sleep(delay)
+                    continue
+                    
+            except Exception as e:
+                error_msg = f"Ошибка при получении ответа от ассистента (попытка {attempt + 1}): {e}"
+                logger.error(error_msg)
+                
+                # Проверяем, содержит ли ошибка информацию о failed run
+                if "failed" in str(e).lower():
+                    logger.warning(f"Обнаружена FAILED ошибка на попытке {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        # Делаем паузу перед следующей попыткой
+                        delay = 2 ** attempt  # 1s, 2s, 4s
+                        logger.info(f"Ожидаем {delay} секунд перед повторной попыткой...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        # Последняя попытка не удалась
+                        user_error_msg = "Произошла ошибка при обработке запроса в AI модели. Попробуйте:"
+                        user_error_msg += "\n• Переформулировать вопрос"
+                        user_error_msg += "\n• Задать более простой вопрос"
+                        user_error_msg += "\n• Повторить запрос через некоторое время"
+                        self._add_to_history(user_id, "assistant", user_error_msg)
+                        return None
+                else:
+                    # Для других ошибок не делаем retry
+                    user_error_msg = f"Произошла техническая ошибка при обработке запроса. Попробуйте позже."
+                    self._add_to_history(user_id, "assistant", user_error_msg)
+                    return None
+                    
+        # Если все попытки исчерпаны
+        logger.error(f"Все {max_retries} попытки исчерпаны для пользователя {user_id}")
+        error_msg = f"Не удалось получить ответ после {max_retries} попыток. Попробуйте позже."
+        self._add_to_history(user_id, "assistant", error_msg)
+        return None
             
     def _wait_for_result(self, run):
         """Ожидает результат выполнения ассистента с расширенной обработкой ошибок"""
