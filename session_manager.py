@@ -62,62 +62,145 @@ class SessionManager:
                 run = self.assistant.run(thread)
                 logger.info("Запущен с базовыми параметрами")
                 
-                # Ждем результат от ассистента
+                # Ждем результат от ассистента с улучшенной обработкой ошибок
                 result = self._wait_for_result(run)
+                
+                if result is None:
+                    # Если результат None, значит произошла ошибка при выполнении
+                    error_msg = "Ассистент не смог обработать ваш запрос. Попробуйте переформулировать вопрос или повторить позже."
+                    self._add_to_history(user_id, "assistant", error_msg)
+                    return error_msg
                 
                 # Формируем ответ из результата
                 response = self._format_response(result)
+                
+                if not response or response.strip() == "":
+                    response = "Извините, не удалось получить ответ на ваш вопрос. Попробуйте переформулировать запрос."
                 
                 # Сохраняем ответ ассистента в истории
                 self._add_to_history(user_id, "assistant", response)
                     
                 logger.info(f"Получен ответ для пользователя {user_id}")
                 return response
+                
             except Exception as e:
-                logger.error(f"Ошибка при получении ответа от ассистента: {e}")
-                return f"Произошла ошибка при обработке запроса: {str(e)}"
+                error_msg = f"Ошибка при получении ответа от ассистента: {e}"
+                logger.error(error_msg)
+                
+                # Проверяем, содержит ли ошибка информацию о failed run
+                if "failed" in str(e).lower():
+                    user_error_msg = "Произошла ошибка при обработке запроса в AI модели. Попробуйте:"
+                    user_error_msg += "\n• Переформулировать вопрос"
+                    user_error_msg += "\n• Задать более простой вопрос"
+                    user_error_msg += "\n• Повторить запрос через некоторое время"
+                else:
+                    user_error_msg = f"Произошла техническая ошибка при обработке запроса. Попробуйте позже."
+                
+                self._add_to_history(user_id, "assistant", user_error_msg)
+                return user_error_msg
+                
         except Exception as e:
-            logger.error(f"Ошибка при записи сообщения в тред: {e}")
+            error_msg = f"Ошибка при записи сообщения в тред: {e}"
+            logger.error(error_msg)
             return f"Произошла ошибка при отправке сообщения: {str(e)}"
             
     def _wait_for_result(self, run):
-        """Ожидает результат выполнения ассистента с обработкой различных форматов ответа"""
+        """Ожидает результат выполнения ассистента с расширенной обработкой ошибок"""
         try:
-            # Вариант 1: результат возвращается как message в объекте run.wait()
-            result = run.wait().message
-            return result
-        except (AttributeError, TypeError):
+            # Ждем завершения run
+            run_result = run.wait()
+            
+            # Проверяем статус выполнения, если доступен
+            if hasattr(run_result, 'status'):
+                logger.info(f"Статус выполнения run: {run_result.status}")
+                if run_result.status == 'failed':
+                    logger.error("Run завершился с ошибкой")
+                    return None
+            
+            # Проверяем наличие результата
+            if hasattr(run_result, 'message') and run_result.message is not None:
+                logger.info("Получен результат через атрибут message")
+                return run_result.message
+            elif run_result is not None:
+                logger.info("Получен результат напрямую")
+                return run_result
+            else:
+                logger.warning("Run завершился, но результат пустой")
+                return None
+                
+        except AttributeError as e:
+            logger.error(f"Ошибка атрибута при ожидании результата: {e}")
             try:
-                # Вариант 2: результат возвращается напрямую из run.wait()
+                # Альтернативный способ получения результата
                 result = run.wait()
-                return result
-            except Exception as e:
-                logger.error(f"Ошибка при ожидании результата: {e}")
-                raise
+                if result is not None:
+                    return result
+                else:
+                    logger.error("Альтернативный способ тоже вернул None")
+                    return None
+            except Exception as e2:
+                logger.error(f"Альтернативный способ получения результата не сработал: {e2}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при ожидании результата: {e}")
+            
+            # Проверяем, содержит ли ошибка информацию о том, что run failed
+            if "failed" in str(e).lower() and "don't have a message result" in str(e).lower():
+                logger.error("Run завершился с ошибкой и не содержит результата")
+                return None
+            
+            # Для других ошибок пытаемся получить хоть какой-то результат
+            try:
+                return run.wait()
+            except:
+                return None
                 
     def _format_response(self, result):
         """Форматирует ответ из результата работы ассистента"""
+        if result is None:
+            return "Получен пустой ответ от ассистента."
+            
         try:
             # Проверяем формат результата и выбираем соответствующий метод обработки
             response = ""
             
             # Вариант 1: результат имеет атрибут parts
-            if hasattr(result, 'parts'):
+            if hasattr(result, 'parts') and result.parts:
+                logger.info("Форматируем ответ из parts")
                 for part in result.parts:
-                    response += str(part)
-            # Вариант 2: результат сам является строкой или преобразуемым к строке объектом
-            elif result is not None:
-                response = str(result)
-            # Вариант 3: результат имеет атрибут text
-            elif hasattr(result, 'text'):
+                    if hasattr(part, 'text'):
+                        response += part.text
+                    else:
+                        response += str(part)
+                        
+            # Вариант 2: результат имеет атрибут text
+            elif hasattr(result, 'text') and result.text:
+                logger.info("Форматируем ответ из атрибута text")
                 response = result.text
-            # Вариант 4: результат имеет атрибут content
-            elif hasattr(result, 'content'):
+                
+            # Вариант 3: результат имеет атрибут content
+            elif hasattr(result, 'content') and result.content:
+                logger.info("Форматируем ответ из атрибута content")
                 response = result.content
+                
+            # Вариант 4: результат сам является строкой или преобразуемым к строке объектом
+            elif result is not None:
+                logger.info("Форматируем ответ через str()")
+                response = str(result)
+                
             else:
+                logger.warning("Не удалось определить формат результата")
+                response = "Получен ответ неизвестного формата от ассистента."
+                
+            # Убираем лишние пробелы и проверяем, что ответ не пустой
+            response = response.strip()
+            if not response:
                 response = "Получен пустой ответ от ассистента."
                 
+            logger.info(f"Отформатированный ответ (длина: {len(response)} символов)")
             return response
+            
         except Exception as e:
             logger.error(f"Ошибка при форматировании ответа: {e}")
             return "Ошибка форматирования ответа ассистента."
