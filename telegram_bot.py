@@ -45,6 +45,9 @@ document_processor = None
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
+    if not update.message:
+        return
+        
     # Если бот еще не инициализирован, запускаем инициализацию
     global session_manager
     if not session_manager:
@@ -66,6 +69,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /help"""
+    if not update.message:
+        return
+        
     await update.message.reply_text(
         "Вы можете задать мне любой вопрос, и я постараюсь найти ответ в документах.\n\n"
         "Доступные команды:\n"
@@ -81,13 +87,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /reset"""
+    if not update.message or not update.effective_user:
+        return
+        
     user_id = update.effective_user.id
-    await session_manager.reset_user_thread(user_id)
+    if session_manager:
+        await session_manager.reset_user_thread(user_id)
     await update.message.reply_text("История разговора сброшена. Можете начать новый диалог.")
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /status - показывает текущее состояние обработки"""
+    if not update.message:
+        return
+        
     global initialization_message, session_manager
 
     if not session_manager:
@@ -103,6 +116,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /cancel - отменяет текущую загрузку документов"""
+    if not update.message:
+        return
+        
     global document_processor
 
     if not 'document_processor' in globals() or document_processor is None:
@@ -120,6 +136,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /history - показывает историю разговора"""
+    if not update.message or not update.effective_user:
+        return
+        
     global session_manager
 
     if not session_manager:
@@ -164,6 +183,9 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /reindex - принудительно пересоздает поисковый индекс"""
+    if not update.message:
+        return
+        
     global document_processor, session_manager, initialization_message
     
     if not document_processor:
@@ -198,11 +220,11 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         # Сначала загружаем файлы, если они еще не загружены
         if not document_processor.files:
-            await progress_message.edit_text("🔄 Загружаю Markdown-файлы для создания индекса...")
-            files = await document_processor.upload_markdown_files()
+            await progress_message.edit_text("🔄 Загружаю документы (Markdown и DOCX файлы) для создания индекса...")
+            files = await document_processor.upload_documents()
             if not files:
                 await progress_message.edit_text(
-                    "⚠️ Не удалось загрузить файлы для индексации. Проверьте наличие Markdown-файлов в директории data/md."
+                    "⚠️ Не удалось загрузить файлы для индексации. Проверьте наличие документов (.md или .docx файлов) в директории data/md."
                 )
                 return
         
@@ -219,48 +241,54 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_message.edit_text("🔧 Создаем инструмент поиска и обновляем ассистента...")
         
         # Создаем инструмент поиска
-        search_tool = sdk.tools.search_index(search_index)
+        if sdk:
+            search_tool = sdk.tools.search_index(search_index)
+        else:
+            await progress_message.edit_text("❌ SDK не инициализирован")
+            return
         
         # Проверяем текущего ассистента
         if session_manager and session_manager.assistant:
-            # Создаем нового ассистента с обновленным инструментом поиска
-            model = sdk.models.completions("yandexgpt-lite", model_version="rc")
-            
-            # Настроим модель (используем тот же код, что и при начальной инициализации)
-            try:
-                # Применяем настройки модели из основного кода
-                model = model.configure(temperature=DEFAULT_TEMPERATURE)
-            except Exception as e:
-                logger.error(f"Ошибка при настройке модели: {e}")
-            
-            # Создаем нового ассистента с новым инструментом поиска
-            instruction = """Вы - умный ассистент агронома, который помогает пользователям находить информацию в документах.
+            # Инструкция для ассистента
+            instruction = f"""
+Инструкция:
+1.  Всегда проверяй наличие ссылок на изображения вида ![](_page_X_Picture_Y.jpeg) в найденных текстовых частях контекста.
+2.  Если для вопроса пользователя найдено релевантное изображение, упоминай о его наличии и рекомендуй загрузку по предоставленной ссылке (если она
+есть).
+3.  Отвечай на русском языке, используя в первую очередь информацию из локального контента без внешних источников.
 
-Давай ответ по следующей структуре:
-- первый абзац - краткая суть рассматриваемого вопроса
-- далее подробный ответ с разбивкой по пунктам
-- если есть возможность приводить примеры - приводи
-- в конце вывод
-
-При ответе на вопросы следуйте этим правилам:
-1. Всегда используйте инструмент поиска для нахождения релевантной информации в документах.
-2. Если в документах есть ответ на вопрос, используйте ТОЛЬКО информацию из документов.
-3. Если информации в документах недостаточно, укажите это и дополните ответ своими знаниями.
-4. Если в документах нет ответа на вопрос, сообщите об этом и ответьте на основе своих знаний.
-5. Всегда будьте вежливы, информативны и старайтесь дать максимально полный ответ.
-6. Отвечайте на русском языке, даже если вопрос задан на другом языке.
-7. Если вопрос двусмысленный или неясный, попросите уточнить детали.
-8. При ответе на основе документов, указывайте источник информации.
-9. Если в документах ссылка на рисунок, то приложи ссылку на этот рисунок!
-
-Ваша основная задача - предоставлять точную и полезную информацию из загруженных документов."""
+Формат ответа с изображениями:
+- Если в текстовых частях контекста есть ссылки на изображения, обязательно добавь в ответ ссылки на них.
+- Если есть ссылки, то указывай явно: См. также изображение [./data/book1/images/page_X_Picture_Y.jpeg]"""
             
             try:
-                assistant = sdk.assistants.create(model, tools=[search_tool], instruction=instruction)
+                if sdk:
+                    # Создаем нового ассистента с новым инструментом поиска
+                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = model.configure(temperature=DEFAULT_TEMPERATURE)
+                    assistant = sdk.assistants.create(
+                        model,
+                        instruction=instruction,
+                        max_prompt_tokens=5000,
+                        ttl_days=6,
+                        tools=[search_tool]
+                    )
+                else:
+                    await progress_message.edit_text("❌ SDK не инициализирован")
+                    return
             except Exception as e:
                 logger.error(f"Ошибка при создании ассистента: {e}")
                 # Пробуем базовый вариант без инструкции
-                assistant = sdk.assistants.create(model, tools=[search_tool])
+                if sdk:
+                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = model.configure(temperature=DEFAULT_TEMPERATURE)
+                    assistant = sdk.assistants.create(
+                        model,
+                        tools=[search_tool]
+                    )
+                else:
+                    await progress_message.edit_text("❌ SDK не инициализирован")
+                    return
             
             # Обновляем ассистента в менеджере сессий
             session_manager.assistant = assistant
@@ -278,6 +306,9 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
+    if not update.message or not update.effective_user:
+        return
+        
     # Если бот еще не инициализирован, запускаем инициализацию
     global session_manager, document_processor
     if not session_manager:
@@ -294,13 +325,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     user_message = update.message.text
 
+    if not user_message:
+        await update.message.reply_text("Пожалуйста, отправьте текстовое сообщение.")
+        return
+
     # Отправляем сообщение о том, что бот обрабатывает запрос
     processing_message = await update.message.reply_text("Обрабатываю ваш запрос...")
 
     try:
         # Обычный режим работы с документами
-        response = await session_manager.send_message(user_id, user_message)
-        await processing_message.edit_text(response)
+        if session_manager:
+            response = await session_manager.send_message(user_id, user_message)
+            await processing_message.edit_text(response)
+        else:
+            await processing_message.edit_text("Ошибка: сессия не инициализирована")
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         await processing_message.edit_text(
@@ -308,12 +346,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-async def initialize_yandex_cloud(update: Update = None):
+async def initialize_yandex_cloud(update: Update | None = None):
     """Инициализация Yandex Cloud SDK и создание ассистента"""
     global sdk, session_manager, initialization_message, document_processor
     
     progress_message = None
-    if update:
+    if update and update.message:
         progress_message = await update.message.reply_text("Инициализация Yandex Cloud SDK...")
         initialization_message = progress_message
     
@@ -350,10 +388,10 @@ async def initialize_yandex_cloud(update: Update = None):
     else:
         # Если индекс не найден, загружаем документы и создаем новый
         if progress_message:
-            await progress_message.edit_text("Существующий индекс не найден. Начинаю загрузку Markdown-файлов...")
+            await progress_message.edit_text("Существующий индекс не найден. Начинаю загрузку документов (Markdown и DOCX файлов)...")
             
         # Загрузка документов
-        files = await document_processor.upload_markdown_files()
+        files = await document_processor.upload_documents()
         
         # Создание индекса
         if files:
@@ -390,34 +428,6 @@ async def initialize_yandex_cloud(update: Update = None):
         await progress_message.edit_text("🔧 Создаем ассистента...")
     
     logger.info("Создаем ассистента")
-    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
-    
-    # Настраиваем модель с правильными параметрами
-    try:
-        # В новой версии SDK параметры могут отличаться
-        # Пробуем разные варианты настройки в порядке приоритета
-        try:
-            # Вариант 1: попробуем использовать параметр prompt_template для системного промпта
-            model = model.configure(
-                temperature=DEFAULT_TEMPERATURE,
-                prompt_template={"system_prompt": DEFAULT_SYSTEM_PROMPT}
-            )
-            logger.info("Модель настроена с использованием prompt_template")
-        except (TypeError, ValueError):
-            try:
-                # Вариант 2: возможно, нужно использовать просто temperature
-                model = model.configure(temperature=DEFAULT_TEMPERATURE)
-                logger.info(f"Модель настроена только с температурой {DEFAULT_TEMPERATURE}")
-
-                # Попробуем добавить системный промпт через другие методы, если они доступны
-                if hasattr(model, 'with_system_prompt'):
-                    model = model.with_system_prompt(DEFAULT_SYSTEM_PROMPT)
-                    logger.info("Добавлен системный промпт через метод with_system_prompt")
-            except Exception as e:
-                logger.warning(f"Не удалось настроить модель: {e}. Используем модель по умолчанию.")
-    except Exception as e:
-        logger.error(f"Ошибка при настройке модели: {e}")
-        # Продолжаем работу с моделью по умолчанию, без дополнительных настроек
 
     # Добавляем инструмент поиска, только если он был создан
     tools = [search_tool] if search_tool else []
@@ -425,50 +435,50 @@ async def initialize_yandex_cloud(update: Update = None):
     logger.info(f"Создаем ассистента {mode}")
 
     # Инструкция для ассистента с поиском по документам
-    instruction = """Вы - умный ассистент агронома, который помогает пользователям находить информацию в документах.
+    instruction = f"""
+Инструкция:
+1.  Всегда проверяй наличие ссылок на изображения вида ![](_page_X_Picture_Y.jpeg) в найденных текстовых частях контекста.
+2.  Если для вопроса пользователя найдено релевантное изображение, упоминай о его наличии и рекомендуй загрузку по предоставленной ссылке (если она
+есть).
+3.  Отвечай на русском языке, используя в первую очередь информацию из локального контента без внешних источников.
 
-При ответе на вопросы следуйте этим правилам:
-1. Всегда используйте инструмент поиска для нахождения релевантной информации в документах.
-2. Если в документах есть ответ на вопрос, используйте ТОЛЬКО информацию из документов.
-3. Если информации в документах недостаточно, укажите это и дополните ответ своими знаниями.
-4. Если в документах нет ответа на вопрос, сообщите об этом и ответьте на основе своих знаний.
-5. Всегда будьте вежливы, информативны и старайтесь дать максимально полный ответ.
-6. Отвечайте на русском языке, даже если вопрос задан на другом языке.
-7. Если вопрос двусмысленный или неясный, попросите уточнить детали.
-8. При ответе на основе документов, указывайте источник информации.
-
-Ваша основная задача - предоставлять точную и полезную информацию из загруженных документов."""
+Формат ответа с изображениями:
+- Если в текстовых частях контекста есть ссылки на изображения, обязательно добавь в ответ ссылки на них.
+- Если есть ссылки, то указывай явно: См. также изображение [./data/book1/images/page_X_Picture_Y.jpeg]."""
 
     try:
-        # Вариант 1: создание ассистента с указанными инструментами, моделью и инструкцией
+        # Создание ассистента с правильным API
         if search_tool:
-            try:
-                assistant = sdk.assistants.create(model, tools=tools, instruction=instruction)
-                logger.info("Ассистент создан с инструкцией и инструментом поиска")
-            except TypeError as e:
-                logger.warning(f"Не удалось создать ассистента с инструкцией: {e}. Пробуем альтернативный вариант.")
-                try:
-                    # Проверяем другие возможные параметры для instruction
-                    if hasattr(model, 'with_system_prompt'):
-                        model = model.with_system_prompt(instruction)
-                        assistant = sdk.assistants.create(model, tools=tools)
-                        logger.info("Ассистент создан с системным промптом и инструментом поиска")
-                    else:
-                        assistant = sdk.assistants.create(model, tools=tools)
-                        logger.info("Ассистент создан только с инструментом поиска (без инструкции)")
-                except Exception as e2:
-                    logger.error(f"Ошибка при создании ассистента с инструментом поиска: {e2}")
-                    assistant = sdk.assistants.create(model)
-                    logger.warning("Ассистент создан без инструментов поиска из-за ошибки")
-        else:
-            # Создание обычного ассистента без инструментов поиска
-            assistant = sdk.assistants.create(model)
-            logger.info("Создан обычный ассистент без инструментов поиска")
+            model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+            model = model.configure(temperature=DEFAULT_TEMPERATURE)
+            assistant = sdk.assistants.create(
+                model,
+                instruction=instruction,
+                temperature=0.5,
+                max_prompt_tokens=5000,
+                ttl_days=6,
+                expiration_policy="static",
+                tools=tools
+            )
+            logger.info("Ассистент создан с инструкцией и инструментом поиска")
+        # else:
+        #     # Создание обычного ассистента без инструментов поиска
+        #     assistant = sdk.assistants.create(
+        #         "yandexgpt-lite", 
+        #         model_version="rc",
+        #         temperature=DEFAULT_TEMPERATURE,
+        #         instruction=instruction
+        #     )
+        #     logger.info("Создан обычный ассистент без инструментов поиска")
     except Exception as e:
         logger.error(f"Ошибка при создании ассистента: {e}")
         # Пробуем создать базового ассистента в случае ошибки
-        assistant = sdk.assistants.create(model)
-        logger.warning("Создан базовый ассистент из-за ошибки")
+        try:
+            assistant = sdk.assistants.create("yandexgpt", temperature=DEFAULT_TEMPERATURE)
+            logger.warning("Создан базовый ассистент из-за ошибки")
+        except Exception as e2:
+            logger.error(f"Критическая ошибка при создании ассистента: {e2}")
+            return False
 
     # Инициализация менеджера сессий
     if progress_message:
@@ -483,10 +493,15 @@ async def initialize_yandex_cloud(update: Update = None):
     return True
 
 
-async def main() -> None:
+async def main():
     """Запуск бота"""
     # Создание бота
     logger.info("Запуск бота")
+    
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN не установлен")
+        return None
+        
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Регистрация обработчиков команд
@@ -508,13 +523,17 @@ async def main() -> None:
     try:
         await application.initialize()
         await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        if application.updater:
+            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
-        # Сообщаем, что бот запущен и готов
-        logger.info("Бот успешно запущен и готов к работе")
+            # Сообщаем, что бот запущен и готов
+            logger.info("Бот успешно запущен и готов к работе")
 
-        # Возвращаем объект приложения, чтобы иметь возможность корректно завершить его позже
-        return application
+            # Возвращаем объект приложения, чтобы иметь возможность корректно завершить его позже
+            return application
+        else:
+            logger.error("Updater не инициализирован")
+            return None
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
         # Пытаемся остановить уже запущенные компоненты

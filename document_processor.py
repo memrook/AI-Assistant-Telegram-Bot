@@ -4,6 +4,7 @@ import time
 import asyncio
 import json
 from pathlib import Path
+from docx import Document
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk.search_indexes import (
     HybridSearchIndexType,
@@ -98,69 +99,141 @@ class DocumentProcessor:
                 await self.update_callback(status)
             else:
                 await self.update_callback(message)
+
+    def _extract_text_from_docx(self, docx_path):
+        """Извлекает текст из DOCX файла"""
+        try:
+            doc = Document(docx_path)
+            full_text = []
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    full_text.append(paragraph.text.strip())
+            return '\n'.join(full_text)
+        except Exception as e:
+            logger.error(f"Ошибка при извлечении текста из DOCX файла {docx_path}: {e}")
+            return None
+
+    def _convert_docx_to_md(self, docx_path, output_dir):
+        """Конвертирует DOCX файл в Markdown и сохраняет во временную директорию"""
+        try:
+            text_content = self._extract_text_from_docx(docx_path)
+            if not text_content:
+                return None
+                
+            # Создаем имя файла для MD версии
+            docx_filename = Path(docx_path).stem
+            md_filename = f"{docx_filename}.md"
+            md_path = Path(output_dir) / md_filename
+            
+            # Создаем директорию если ее нет
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Записываем содержимое в MD файл
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(f"# {docx_filename}\n\n")
+                f.write(text_content)
+                
+            return md_path
+        except Exception as e:
+            logger.error(f"Ошибка при конвертации DOCX в MD: {e}")
+            return None
         
-    async def upload_markdown_files(self, md_dir="./data/md"):
-        """Загружает готовые Markdown-файлы в Yandex Cloud"""
+    async def upload_documents(self, doc_dir="./data/md"):
+        """Загружает готовые Markdown и DOCX файлы в Yandex Cloud"""
         
         self.is_processing = True
         self.progress_info["start_time"] = time.time()
         
-        # Проверяем существование директории с Markdown-файлами
-        md_path = Path(md_dir)
-        if not md_path.exists():
-            await self._send_progress_update(f"❌ Директория {md_dir} не существует. Создайте её и поместите туда Markdown-файлы.")
+        # Проверяем существование директории с документами
+        doc_path = Path(doc_dir)
+        if not doc_path.exists():
+            await self._send_progress_update(f"❌ Директория {doc_dir} не существует. Создайте её и поместите туда документы.")
             self.is_processing = False
             return []
         
-        md_files = list(md_path.glob("*.md"))
-        total_files = len(md_files)
+        # Ищем файлы поддерживаемых форматов
+        md_files = list(doc_path.glob("*.md"))
+        docx_files = list(doc_path.glob("*.docx"))
+        all_files = md_files + docx_files
+        
+        total_files = len(all_files)
         self.progress_info["total_files"] = total_files
         
         if total_files == 0:
-            await self._send_progress_update(f"⚠️ В директории {md_dir} не найдено Markdown-файлов.")
+            await self._send_progress_update(f"⚠️ В директории {doc_dir} не найдено документов (.md или .docx файлов).")
             self.is_processing = False
             return []
             
-        await self._send_progress_update(f"Найдено {total_files} Markdown-файлов для загрузки")
+        await self._send_progress_update(f"Найдено {len(md_files)} Markdown и {len(docx_files)} DOCX файлов для загрузки")
         
         processed_files = 0
         self.progress_info["processed_files"] = processed_files
         
-        for i, md_file_path in enumerate(md_files, 1):
-            # Проверяем, не была ли отменена обработка
-            if not self.is_processing:
-                await self._send_progress_update(f"🛑 Загрузка документов прервана пользователем. Загружено {processed_files}/{total_files} файлов.")
-                return self.files
-            
-            file_progress = f"[{i}/{total_files}] ({i*100//total_files}%)"
-            
-            # Обновляем информацию о прогрессе
-            self.progress_info["current_file"] = md_file_path.name
-            self.progress_info["current_step"] = "Загрузка в Yandex Cloud"
-            
-            # Проверяем, что файл не пустой
-            try:
-                if md_file_path.stat().st_size == 0:
-                    await self._send_progress_update(f"{file_progress} ⚠️ Файл {md_file_path.name} пустой, пропускаем")
-                    continue
-            except Exception as e:
-                await self._send_progress_update(f"{file_progress} ❌ Ошибка при проверке файла {md_file_path.name}: {e}")
-                continue
+        # Создаем временную директорию для конвертированных DOCX файлов
+        temp_dir = Path("./temp_converted")
+        temp_dir.mkdir(exist_ok=True)
+        
+        try:
+            for i, file_path in enumerate(all_files, 1):
+                # Проверяем, не была ли отменена обработка
+                if not self.is_processing:
+                    await self._send_progress_update(f"🛑 Загрузка документов прервана пользователем. Загружено {processed_files}/{total_files} файлов.")
+                    return self.files
                 
-            # Загружаем Markdown-файл в Yandex Cloud
+                file_progress = f"[{i}/{total_files}] ({i*100//total_files}%)"
+                
+                # Обновляем информацию о прогрессе
+                self.progress_info["current_file"] = file_path.name
+                
+                # Проверяем, что файл не пустой
+                try:
+                    if file_path.stat().st_size == 0:
+                        await self._send_progress_update(f"{file_progress} ⚠️ Файл {file_path.name} пустой, пропускаем")
+                        continue
+                except Exception as e:
+                    await self._send_progress_update(f"{file_progress} ❌ Ошибка при проверке файла {file_path.name}: {e}")
+                    continue
+                
+                # Определяем путь для загрузки
+                upload_path = file_path
+                
+                # Если это DOCX файл, конвертируем его в MD
+                if file_path.suffix.lower() == '.docx':
+                    self.progress_info["current_step"] = "Конвертация DOCX в MD"
+                    await self._send_progress_update(f"{file_progress} Конвертируем {file_path.name} из DOCX в Markdown...")
+                    
+                    converted_path = self._convert_docx_to_md(file_path, temp_dir)
+                    if not converted_path:
+                        await self._send_progress_update(f"{file_progress} ❌ Ошибка при конвертации {file_path.name}")
+                        continue
+                    upload_path = converted_path
+                    
+                # Загружаем файл в Yandex Cloud
+                try:
+                    self.progress_info["current_step"] = "Загрузка в Yandex Cloud"
+                    await self._send_progress_update(f"{file_progress} Загружаем {file_path.name} в Yandex Cloud...")
+                    start_time = time.time()
+                    file = self.sdk.files.upload(str(upload_path))
+                    self.files.append(file)
+                    processed_files += 1
+                    self.progress_info["processed_files"] = processed_files
+                    duration = time.time() - start_time
+                    file_type = "DOCX→MD" if file_path.suffix.lower() == '.docx' else "MD"
+                    await self._send_progress_update(
+                        f"{file_progress} ✅ Файл {file_path.name} ({file_type}) успешно загружен (заняло {duration:.1f} сек), ID: {file.id}"
+                    )
+                except Exception as e:
+                    await self._send_progress_update(f"{file_progress} ❌ Ошибка при загрузке {file_path.name}: {e}")
+        
+        finally:
+            # Очищаем временную директорию
             try:
-                await self._send_progress_update(f"{file_progress} Загружаем {md_file_path.name} в Yandex Cloud...")
-                start_time = time.time()
-                file = self.sdk.files.upload(str(md_file_path))
-                self.files.append(file)
-                processed_files += 1
-                self.progress_info["processed_files"] = processed_files
-                duration = time.time() - start_time
-                await self._send_progress_update(
-                    f"{file_progress} ✅ Файл {md_file_path.name} успешно загружен (заняло {duration:.1f} сек), ID: {file.id}"
-                )
+                import shutil
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir)
+                    logger.info("Временная директория очищена")
             except Exception as e:
-                await self._send_progress_update(f"{file_progress} ❌ Ошибка при загрузке {md_file_path.name}: {e}")
+                logger.warning(f"Не удалось очистить временную директорию: {e}")
         
         elapsed = time.time() - self.progress_info["start_time"]
         await self._send_progress_update(
@@ -168,6 +241,11 @@ class DocumentProcessor:
             f"Загружено {processed_files}/{total_files} файлов."
         )
         return self.files
+
+    # Оставляем старый метод для обратной совместимости
+    async def upload_markdown_files(self, md_dir="./data/md"):
+        """Устаревший метод. Используйте upload_documents()"""
+        return await self.upload_documents(md_dir)
         
     async def check_existing_index(self):
         """Проверяет существование ранее созданного индекса"""
