@@ -3,11 +3,12 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -302,6 +303,58 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_message.edit_text(f"❌ Произошла ошибка при пересоздании индекса: {str(e)[:100]}...")
 
 
+async def handle_detailed_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик callback для кнопки 'Развернутый ответ'"""
+    query = update.callback_query
+    if not query or not update.effective_user:
+        return
+        
+    # Подтверждаем получение callback
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    # Если бот еще не инициализирован, запускаем инициализацию
+    global session_manager
+    if not session_manager:
+        await query.edit_message_text(
+            "Начинаю инициализацию бота. Это может занять некоторое время..."
+        )
+        # Создаем временный update для передачи в initialize_yandex_cloud
+        temp_update = Update(
+            update_id=update.update_id,
+            message=query.message
+        )
+        success = await initialize_yandex_cloud(temp_update)
+        if not success:
+            await query.edit_message_text(
+                "❌ Не удалось инициализировать бота. Пожалуйста, обратитесь к администратору."
+            )
+            return
+    
+    # Отправляем сообщение о том, что бот обрабатывает запрос
+    await query.edit_message_text("Готовлю более развернутый ответ...")
+    
+    try:
+        if session_manager:
+            # Отправляем запрос на развернутый ответ
+            response = await session_manager.send_message(user_id, "Дай более развернутый ответ")
+            
+            # Проверяем длину ответа и добавляем кнопку, если ответ короткий
+            if len(response) < 300:
+                keyboard = [[InlineKeyboardButton("Развернутый ответ", callback_data="detailed_answer")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(response, reply_markup=reply_markup)
+            else:
+                await query.edit_message_text(response)
+        else:
+            await query.edit_message_text("Ошибка: сессия не инициализирована")
+    except Exception as e:
+        logger.error(f"Ошибка при обработке callback для подробного ответа: {e}")
+        await query.edit_message_text(
+            "Произошла ошибка при получении подробного ответа. Пожалуйста, попробуйте еще раз."
+        )
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
@@ -335,7 +388,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Обычный режим работы с документами
         if session_manager:
             response = await session_manager.send_message(user_id, user_message)
-            await processing_message.edit_text(response)
+            
+            # Проверяем длину ответа и добавляем кнопку, если ответ короткий
+            if len(response) < 300:
+                keyboard = [[InlineKeyboardButton("Развернутый ответ", callback_data="detailed_answer")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await processing_message.edit_text(response, reply_markup=reply_markup)
+            else:
+                await processing_message.edit_text(response)
         else:
             await processing_message.edit_text("Ошибка: сессия не инициализирована")
     except Exception as e:
@@ -514,6 +574,9 @@ async def main():
 
     # Регистрация обработчика текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Регистрация обработчика callback-запросов
+    application.add_handler(CallbackQueryHandler(handle_detailed_answer_callback))
 
     # Настраиваем graceful shutdown
     application.post_shutdown = shutdown_handler
