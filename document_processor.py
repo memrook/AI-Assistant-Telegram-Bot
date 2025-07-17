@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 from docx import Document
+from dotenv import load_dotenv
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk.search_indexes import (
     HybridSearchIndexType,
@@ -12,7 +13,14 @@ from yandex_cloud_ml_sdk.search_indexes import (
     ReciprocalRankFusionIndexCombinationStrategy,
 )
 
+# Загрузка переменных окружения
+load_dotenv()
+
 logger = logging.getLogger(__name__)
+
+# Параметры поискового индекса из переменных окружения
+CHUNK_SIZE_TOKENS = int(os.getenv("CHUNK_SIZE_TOKENS", "1024"))
+CHUNK_OVERLAP_TOKENS = int(os.getenv("CHUNK_OVERLAP_TOKENS", "512"))
 
 # Путь к файлу для хранения ID индекса
 INDEX_CONFIG_FILE = "data/index_config.json"
@@ -297,8 +305,8 @@ class DocumentProcessor:
                 self.files,
                 index_type=HybridSearchIndexType(
                     chunking_strategy=StaticIndexChunkingStrategy(
-                        max_chunk_size_tokens=1024,  # Увеличиваем размер чанка для лучшего контекста
-                        chunk_overlap_tokens=512,    # Увеличиваем перекрытие для лучшей связности
+                        max_chunk_size_tokens=CHUNK_SIZE_TOKENS,     # Размер чанка из переменной окружения
+                        chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,   # Перекрытие чанков из переменной окружения
                     ),
                     combination_strategy=ReciprocalRankFusionIndexCombinationStrategy(),
                 ),
