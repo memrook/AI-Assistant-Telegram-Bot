@@ -1,14 +1,14 @@
 import logging
 import json
-from typing import Dict, Optional, List, Any
+import asyncio
+from typing import Dict, List
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk._assistants.assistant import Assistant
 from yandex_cloud_ml_sdk._threads.thread import Thread
-import os
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# TODO Добавить кнопку "Повторить" при ошибке "Статус выполнения run: RunStatus.FAILED"
 class SessionManager:
     """Класс для управления сессиями и тредами пользователей"""
     
@@ -52,125 +52,193 @@ class SessionManager:
         self._add_to_history(user_id, "user", message)
         
         try:
-            # Проверяем, поддерживает ли тред метод записи отдельных сообщений
-            # Это может различаться в разных версиях SDK
-            has_write_method = hasattr(thread, 'write') and callable(getattr(thread, 'write'))
-            has_add_message_method = hasattr(thread, 'add_message') and callable(getattr(thread, 'add_message'))
-            has_add_user_message_method = hasattr(thread, 'add_user_message') and callable(getattr(thread, 'add_user_message'))
+            # Записываем сообщение пользователя в тред используя стандартный метод
+            thread.write(message)
+            logger.info(f"Сообщение пользователя {user_id} записано в тред")
             
-            # Записываем сообщение пользователя в тред
-            if has_write_method:
-                # Стандартный метод в большинстве версий SDK
-                thread.write(message)
-                logger.info(f"Сообщение пользователя {user_id} записано в тред через write()")
-            elif has_add_user_message_method:
-                # Альтернативный метод в некоторых версиях
-                thread.add_user_message(message)
-                logger.info(f"Сообщение пользователя {user_id} записано в тред через add_user_message()")
-            elif has_add_message_method:
-                # Еще один альтернативный метод
-                thread.add_message({"role": "user", "content": message})
-                logger.info(f"Сообщение пользователя {user_id} записано в тред через add_message()")
-            else:
-                # Если нет подходящего метода, логируем ошибку
-                logger.error("Не найден подходящий метод для записи сообщения в тред")
-                return "Ошибка: не удалось отправить сообщение (не поддерживается API)"
-            
-            # Запускаем ассистента с использованием треда
+            # Запускаем ассистента с использованием треда с retry логикой
             logger.info(f"Запускаем ассистента для пользователя {user_id}")
             
+            result = await self._run_assistant_with_retry(thread, user_id)
+            
+            if result is None:
+                # Если результат None, значит произошла ошибка при выполнении
+                error_msg = "Ассистент не смог обработать ваш запрос. Попробуйте переформулировать вопрос или повторить позже."
+                self._add_to_history(user_id, "assistant", error_msg)
+                return error_msg
+            
+            # Формируем ответ из результата
+            response = self._format_response(result)
+            
+            if not response or response.strip() == "":
+                response = "Извините, не удалось получить ответ на ваш вопрос. Попробуйте переформулировать запрос."
+            
+            # Сохраняем ответ ассистента в истории
+            self._add_to_history(user_id, "assistant", response)
+                
+            logger.info(f"Получен ответ для пользователя {user_id}")
+            return response
+                
+        except Exception as e:
+            error_msg = f"Ошибка при записи сообщения в тред: {e}"
+            logger.error(error_msg)
+            return f"Произошла ошибка при отправке сообщения: {str(e)}"
+    
+    async def _run_assistant_with_retry(self, thread, user_id: int, max_retries: int = 3):
+        """Запускает ассистента с retry логикой при ошибках FAILED статуса"""
+        for attempt in range(max_retries):
             try:
-                # Пробуем запустить с различными параметрами
-                run = None
+                logger.info(f"Попытка {attempt + 1}/{max_retries} запуска ассистента для пользователя {user_id}")
                 
-                # Вариант 1: custom_prompt_truncation_options
-                try:
-                    run = self.assistant.run(
-                        thread,
-                        custom_prompt_truncation_options={
-                            "max_messages": 15  # Увеличиваем лимит для лучшего сохранения контекста
-                        }
-                    )
-                except (TypeError, AttributeError) as e:
-                    logger.warning(f"Не удалось использовать custom_prompt_truncation_options: {e}")
-                    
-                    # Вариант 2: run_with_options
-                    if run is None and hasattr(self.assistant, 'run_with_options'):
-                        try:
-                            run = self.assistant.run_with_options(thread, max_messages=15)
-                        except Exception as e2:
-                            logger.warning(f"Не удалось использовать run_with_options: {e2}")
+                # Используем базовый запуск ассистента (совместимый с новой версией API)
+                run = self.assistant.run(thread, custom_temperature=0.5, custom_max_tokens=1000)
+                logger.info(f"Run запущен (попытка {attempt + 1})")
                 
-                    # Вариант 3: run с передачей истории сообщений напрямую
-                    if run is None and hasattr(self.assistant, 'run') and len(self.conversation_history.get(user_id, [])) > 0:
-                        try:
-                            messages = self.conversation_history[user_id]
-                            run = self.assistant.run(thread, messages=messages)
-                            logger.info(f"Запущен с явной передачей {len(messages)} сообщений из истории")
-                        except Exception as e3:
-                            logger.warning(f"Не удалось использовать явную передачу истории: {e3}")
-                            
-                    # Вариант 4: базовый запуск
-                    if run is None:
-                        run = self.assistant.run(thread)
-                        logger.info("Запущен с базовыми параметрами")
-                
-                # Ждем результат от ассистента
+                # Ждем результат от ассистента с улучшенной обработкой ошибок
                 result = self._wait_for_result(run)
                 
-                # Формируем ответ из результата
-                response = self._format_response(result)
-                
-                # Сохраняем ответ ассистента в истории
-                self._add_to_history(user_id, "assistant", response)
+                if result is not None:
+                    logger.info(f"Успешно получен результат на попытке {attempt + 1}")
+                    return result
+                else:
+                    logger.warning(f"Попытка {attempt + 1} вернула None результат")
+                    if attempt < max_retries - 1:
+                        # Делаем паузу перед следующей попыткой (экспоненциальная задержка)
+                        delay = 2 ** attempt  # 1s, 2s, 4s
+                        logger.info(f"Ожидаем {delay} секунд перед следующей попыткой...")
+                        await asyncio.sleep(delay)
+                    continue
                     
-                logger.info(f"Получен ответ для пользователя {user_id}")
-                return response
             except Exception as e:
-                logger.error(f"Ошибка при получении ответа от ассистента: {e}")
-                return f"Произошла ошибка при обработке запроса: {str(e)}"
-        except Exception as e:
-            logger.error(f"Ошибка при записи сообщения в тред: {e}")
-            return f"Произошла ошибка при отправке сообщения: {str(e)}"
+                error_msg = f"Ошибка при получении ответа от ассистента (попытка {attempt + 1}): {e}"
+                logger.error(error_msg)
+                
+                # Проверяем, содержит ли ошибка информацию о failed run
+                if "failed" in str(e).lower():
+                    logger.warning(f"Обнаружена FAILED ошибка на попытке {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        # Делаем паузу перед следующей попыткой
+                        delay = 2 ** attempt  # 1s, 2s, 4s
+                        logger.info(f"Ожидаем {delay} секунд перед повторной попыткой...")
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        # Последняя попытка не удалась
+                        user_error_msg = "Произошла ошибка при обработке запроса в AI модели. Попробуйте:"
+                        user_error_msg += "\n• Переформулировать вопрос"
+                        user_error_msg += "\n• Задать более простой вопрос"
+                        user_error_msg += "\n• Повторить запрос через некоторое время"
+                        self._add_to_history(user_id, "assistant", user_error_msg)
+                        return None
+                else:
+                    # Для других ошибок не делаем retry
+                    user_error_msg = f"Произошла техническая ошибка при обработке запроса. Попробуйте позже."
+                    self._add_to_history(user_id, "assistant", user_error_msg)
+                    return None
+                    
+        # Если все попытки исчерпаны
+        logger.error(f"Все {max_retries} попытки исчерпаны для пользователя {user_id}")
+        error_msg = f"Не удалось получить ответ после {max_retries} попыток. Попробуйте позже."
+        self._add_to_history(user_id, "assistant", error_msg)
+        return None
             
     def _wait_for_result(self, run):
-        """Ожидает результат выполнения ассистента с обработкой различных форматов ответа"""
+        """Ожидает результат выполнения ассистента с расширенной обработкой ошибок"""
         try:
-            # Вариант 1: результат возвращается как message в объекте run.wait()
-            result = run.wait().message
-            return result
-        except (AttributeError, TypeError):
+            # Ждем завершения run
+            run_result = run.wait()
+            
+            # Проверяем статус выполнения, если доступен
+            if hasattr(run_result, 'status'):
+                logger.info(f"Статус выполнения run: {run_result.status}")
+                if run_result.status == 'failed':
+                    logger.error("Run завершился с ошибкой")
+                    return None
+            
+            # Проверяем наличие результата
+            if hasattr(run_result, 'message') and run_result.message is not None:
+                logger.info("Получен результат через атрибут message")
+                return run_result.message
+            elif run_result is not None:
+                logger.info("Получен результат напрямую")
+                return run_result
+            else:
+                logger.warning("Run завершился, но результат пустой")
+                return None
+                
+        except AttributeError as e:
+            logger.error(f"Ошибка атрибута при ожидании результата: {e}")
             try:
-                # Вариант 2: результат возвращается напрямую из run.wait()
+                # Альтернативный способ получения результата
                 result = run.wait()
-                return result
-            except Exception as e:
-                logger.error(f"Ошибка при ожидании результата: {e}")
-                raise
+                if result is not None:
+                    return result
+                else:
+                    logger.error("Альтернативный способ тоже вернул None")
+                    return None
+            except Exception as e2:
+                logger.error(f"Альтернативный способ получения результата не сработал: {e2}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при ожидании результата: {e}")
+            
+            # Проверяем, содержит ли ошибка информацию о том, что run failed
+            if "failed" in str(e).lower() and "don't have a message result" in str(e).lower():
+                logger.error("Run завершился с ошибкой и не содержит результата")
+                return None
+            
+            # Для других ошибок пытаемся получить хоть какой-то результат
+            try:
+                return run.wait()
+            except:
+                return None
                 
     def _format_response(self, result):
         """Форматирует ответ из результата работы ассистента"""
+        if result is None:
+            return "Получен пустой ответ от ассистента."
+            
         try:
             # Проверяем формат результата и выбираем соответствующий метод обработки
             response = ""
             
             # Вариант 1: результат имеет атрибут parts
-            if hasattr(result, 'parts'):
+            if hasattr(result, 'parts') and result.parts:
+                logger.info("Форматируем ответ из parts")
                 for part in result.parts:
-                    response += str(part)
-            # Вариант 2: результат сам является строкой или преобразуемым к строке объектом
-            elif result is not None:
-                response = str(result)
-            # Вариант 3: результат имеет атрибут text
-            elif hasattr(result, 'text'):
+                    if hasattr(part, 'text'):
+                        response += part.text
+                    else:
+                        response += str(part)
+                        
+            # Вариант 2: результат имеет атрибут text
+            elif hasattr(result, 'text') and result.text:
+                logger.info("Форматируем ответ из атрибута text")
                 response = result.text
-            # Вариант 4: результат имеет атрибут content
-            elif hasattr(result, 'content'):
+                
+            # Вариант 3: результат имеет атрибут content
+            elif hasattr(result, 'content') and result.content:
+                logger.info("Форматируем ответ из атрибута content")
                 response = result.content
+                
+            # Вариант 4: результат сам является строкой или преобразуемым к строке объектом
+            elif result is not None:
+                logger.info("Форматируем ответ через str()")
+                response = str(result)
+                
             else:
+                logger.warning("Не удалось определить формат результата")
+                response = "Получен ответ неизвестного формата от ассистента."
+                
+            # Убираем лишние пробелы и проверяем, что ответ не пустой
+            response = response.strip()
+            if not response:
                 response = "Получен пустой ответ от ассистента."
                 
+            logger.info(f"Отформатированный ответ (длина: {len(response)} символов)")
             return response
+            
         except Exception as e:
             logger.error(f"Ошибка при форматировании ответа: {e}")
             return "Ошибка форматирования ответа ассистента."
@@ -196,103 +264,4 @@ class SessionManager:
             
         return "\n\n".join(formatted_history)
 
-    async def send_message_with_images(self, user_id: int, message: str, images_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Отправляет сообщение ассистенту вместе с информацией об изображениях и получает ответ
-        
-        Args:
-            user_id: ID пользователя
-            message: Текст сообщения
-            images_info: Информация об изображениях из PDF
-            
-        Returns:
-            Dict: Словарь с ответом и рекомендуемыми изображениями
-        """
-        # Получаем или создаем тред для пользователя
-        thread = self._get_or_create_thread(user_id)
-        
-        # Добавляем сообщение пользователя в историю
-        if user_id not in self.conversation_history:
-            self.conversation_history[user_id] = []
-        
-        # Если есть информация об изображениях, добавляем её к сообщению
-        message_with_context = message
-        if images_info:
-            message_with_context += f"\n\nДоступны изображения из документа {images_info['document_name']}:"
-            if images_info['pages']:
-                message_with_context += f"\n- {len(images_info['pages'])} страниц"
-            if images_info['tables']:
-                message_with_context += f"\n- {len(images_info['tables'])} таблиц"
-            if images_info['pictures']:
-                message_with_context += f"\n- {len(images_info['pictures'])} рисунков"
-        
-        self.conversation_history[user_id].append({"role": "user", "content": message})
-        
-        # Отправляем сообщение ассистенту
-        try:
-            response = thread.send_message(message_with_context)
-            assistant_response = response.content
-            
-            # Добавляем ответ ассистента в историю
-            self.conversation_history[user_id].append({"role": "assistant", "content": assistant_response})
-            
-            # Проанализируем ответ и определим, какие изображения могут быть полезны
-            relevant_images = {}
-            if images_info:
-                relevant_images = self._find_relevant_images(assistant_response, images_info)
-            
-            return {
-                "response": assistant_response,
-                "relevant_images": relevant_images
-            }
-        except Exception as e:
-            logger.error(f"Ошибка при отправке сообщения ассистенту: {e}")
-            return {
-                "response": f"Произошла ошибка: {str(e)}",
-                "relevant_images": {}
-            }
-    
-    def _find_relevant_images(self, response: str, images_info: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Определяет, какие изображения могут быть релевантны для ответа
-        
-        Args:
-            response: Ответ ассистента
-            images_info: Информация об изображениях из PDF
-            
-        Returns:
-            Dict: Словарь с релевантными изображениями
-        """
-        relevant_images = {
-            "pages": [],
-            "tables": [],
-            "pictures": []
-        }
-        
-        # Простая эвристика: если в ответе упоминается слово "таблица", добавим первые 2 таблицы
-        if "таблиц" in response.lower() and images_info["tables"]:
-            relevant_images["tables"] = images_info["tables"][:2]
-        
-        # Если упоминается "рисунок", "диаграмма" и т.д., добавим рисунки
-        if any(word in response.lower() for word in ["рисунок", "изображени", "диаграмм", "граф"]) and images_info["pictures"]:
-            relevant_images["pictures"] = images_info["pictures"][:2]
-        
-        # Если упоминается "страница", добавим страницы
-        if "страниц" in response.lower() and images_info["pages"]:
-            relevant_images["pages"] = images_info["pages"][:1]
-        
-        # Если ничего не нашли, добавим первую страницу как наиболее релевантную
-        if (not relevant_images["pages"] and not relevant_images["tables"] and not relevant_images["pictures"] 
-                and images_info["pages"]):
-            relevant_images["pages"] = images_info["pages"][:1]
-            
-        return relevant_images
-
-    def _get_or_create_thread(self, user_id: int):
-        """Получает или создает тред для пользователя"""
-        if user_id not in self.user_threads:
-            # Создаем новый тред
-            self.user_threads[user_id] = self.sdk.threads.create(self.assistant)
-            logger.info(f"Создан новый тред для пользователя {user_id}")
-        
-        return self.user_threads[user_id] 
+ 

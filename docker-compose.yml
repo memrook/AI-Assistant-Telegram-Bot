@@ -1,0 +1,45 @@
+services:
+  ai-assistant-md:
+    build: .
+    image: ai-assistant-md:latest
+    container_name: ai-assistant-md
+    restart: unless-stopped
+    
+    # Переменные окружения из .env файла
+    env_file:
+      - .env
+    
+    # Монтирование директории с документами
+    volumes:
+      - ./data/md:/app/data/md:ro  # Только для чтения
+      - ./data:/app/data          # Для сохранения индекса и конфигов
+      - ./logs:/app/logs          # Для логов (если понадобится)
+    
+    # Настройки сети (если понадобится веб-интерфейс)
+    ports:
+      - "8000:8000"
+    
+    # Ограничения ресурсов (совместимо с docker-compose)
+    mem_limit: 1g
+    mem_reservation: 512m
+    cpus: 0.5
+    
+    # Проверка здоровья контейнера
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Логирование
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Создание именованных volumes (опционально)
+volumes:
+  ai_assistant_data:
+    driver: local 
