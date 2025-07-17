@@ -27,6 +27,8 @@ async def test_yandex_cloud_connection():
     
     YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
     YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
+    YANDEX_MODEL_NAME = os.getenv("YANDEX_MODEL_NAME", "yandexgpt-lite")
+    YANDEX_MODEL_VERSION = os.getenv("YANDEX_MODEL_VERSION", "rc")
     
     # Проверка переменных окружения
     print("\n📋 Проверка переменных окружения:")
@@ -67,7 +69,7 @@ async def test_yandex_cloud_connection():
     # Тест создания ассистента
     print("\n🤖 Тестирование создания ассистента...")
     try:
-        model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+        model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
         model = model.configure(temperature=0.5)
         assistant = sdk.assistants.create(
             model,

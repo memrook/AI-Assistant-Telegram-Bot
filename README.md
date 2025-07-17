@@ -90,6 +90,8 @@ nano .env  # или используйте любой другой редакт�
 YANDEX_API_KEY=ваш-api-ключ
 YANDEX_FOLDER_ID=идентификатор-каталога
 TELEGRAM_BOT_TOKEN=токен-телеграм-бота
+YANDEX_MODEL_NAME=yandexgpt-lite
+YANDEX_MODEL_VERSION=rc
 DEFAULT_TEMPERATURE=0.5
 DEFAULT_SYSTEM_PROMPT="Ваш системный промпт для модели"
 SHORT_MESSAGE_THRESHOLD=300
