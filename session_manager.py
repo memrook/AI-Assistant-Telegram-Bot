@@ -8,6 +8,7 @@ from yandex_cloud_ml_sdk._threads.thread import Thread
 
 logger = logging.getLogger(__name__)
 
+# TODO Добавить кнопку "Повторить" при ошибке "Статус выполнения run: RunStatus.FAILED"
 class SessionManager:
     """Класс для управления сессиями и тредами пользователей"""
     

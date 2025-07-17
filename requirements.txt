@@ -2,4 +2,5 @@ python-telegram-bot>=20.0
 python-dotenv>=1.0.0
 yandex-cloud-ml-sdk>=0.8.0
 asyncio>=3.4.3
-python-docx>=0.8.11 
+python-docx>=0.8.11
+aiofiles>=23.0.0 

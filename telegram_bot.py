@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
+import aiofiles
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,7 +19,7 @@ from yandex_cloud_ml_sdk import YCloudML
 from document_processor import DocumentProcessor
 from session_manager import SessionManager
 
-# TODO Добавить функцию загрузки документов через Телеграм
+
 
 # Настройка логирования
 logging.basicConfig(
@@ -67,6 +69,117 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /upload - инструкция по загрузке документов"""
+    if not update.message:
+        return
+        
+    await update.message.reply_text(
+        "📤 Загрузка документов\n\n"
+        "Отправьте мне документ, и я сохраню его в базу знаний.\n\n"
+        "Поддерживаемые форматы:\n"
+        "• Markdown (.md) (рекомендуется)\n"
+        "• Word документы (.docx)\n"
+        "• Текстовые файлы (.txt)\n\n"
+        "После загрузки документа я предложу обновить поисковый индекс для включения нового документа в поиск.\n\n"
+        "Просто отправьте файл как вложение в следующем сообщении."
+    )
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик загруженных документов"""
+    if not update.message or not update.message.document:
+        return
+        
+    document = update.message.document
+    
+    # Проверяем размер файла (максимум 20 МБ)
+    max_size = 20 * 1024 * 1024  # 20 МБ
+    if document.file_size and document.file_size > max_size:
+        await update.message.reply_text(
+            "❌ Файл слишком большой. Максимальный размер: 20 МБ"
+        )
+        return
+    
+    # Проверяем расширение файла
+    file_name = document.file_name or "unknown"
+    file_ext = Path(file_name).suffix.lower()
+    
+    supported_extensions = {'.md', '.docx', '.txt'}
+    if file_ext not in supported_extensions:
+        await update.message.reply_text(
+            f"❌ Неподдерживаемый формат файла: {file_ext}\n\n"
+            "Поддерживаемые форматы:\n"
+            "• Markdown (.md)\n"
+            "• Word документы (.docx)\n"
+            "• Текстовые файлы (.txt)"
+        )
+        return
+    
+    # Отправляем сообщение о начале загрузки
+    status_message = await update.message.reply_text(f"📥 Загружаю файл {file_name}...")
+    
+    try:
+        # Получаем файл от Telegram
+        file = await document.get_file()
+        
+        # Создаем путь для сохранения
+        save_dir = Path("./data/md")
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Генерируем уникальное имя файла, если файл с таким именем уже существует
+        save_path = save_dir / file_name
+        counter = 1
+        while save_path.exists():
+            name_without_ext = Path(file_name).stem
+            ext = Path(file_name).suffix
+            save_path = save_dir / f"{name_without_ext}_{counter}{ext}"
+            counter += 1
+        
+        # Конвертируем .txt файлы в .md
+        if file_ext == '.txt':
+            save_path = save_path.with_suffix('.md')
+            
+        await status_message.edit_text(f"💾 Сохраняю файл {save_path.name}...")
+        
+        # Скачиваем и сохраняем файл
+        await file.download_to_drive(save_path)
+        
+        # Если это .txt файл, добавляем заголовок в формате markdown
+        if file_ext == '.txt':
+            # Читаем содержимое
+            async with aiofiles.open(save_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+            
+            # Добавляем заголовок и сохраняем
+            title = Path(file_name).stem
+            markdown_content = f"# {title}\n\n{content}"
+            
+            async with aiofiles.open(save_path, 'w', encoding='utf-8') as f:
+                await f.write(markdown_content)
+        
+        # Создаем кнопку для обновления индекса
+        keyboard = [[InlineKeyboardButton("🔄 Обновить поисковый индекс", callback_data="reindex_after_upload")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await status_message.edit_text(
+            f"✅ Файл {save_path.name} успешно сохранен!\n\n"
+            f"📁 Путь: {save_path}\n"
+            f"📊 Размер: {document.file_size / 1024:.1f} КБ\n\n"
+            "Для включения документа в поиск рекомендуется обновить поисковый индекс.",
+            reply_markup=reply_markup
+        )
+        
+        logger.info(f"Документ загружен: {save_path}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке документа: {e}")
+        await status_message.edit_text(
+            f"❌ Ошибка при загрузке файла: {str(e)[:100]}...\n\n"
+            "Попробуйте загрузить файл еще раз."
+        )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /help"""
     if not update.message:
@@ -77,6 +190,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Доступные команды:\n"
         "/start - Начать общение с ботом\n"
         "/help - Показать справку\n"
+        "/upload - Загрузить новый документ в базу знаний\n"
         "/reset - Сбросить историю разговора\n"
         "/status - Получить статус загрузки документов\n"
         "/cancel - Отменить текущую загрузку документов\n"
@@ -303,8 +417,124 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await progress_message.edit_text(f"❌ Произошла ошибка при пересоздании индекса: {str(e)[:100]}...")
 
 
+async def run_reindex_process(query):
+    """Выполняет пересоздание поискового индекса (для callback запросов)"""
+    global document_processor, session_manager
+    
+    if not document_processor:
+        await query.edit_message_text("⚠️ Бот еще не инициализирован.")
+        return
+    
+    # Проверяем, что процессор не занят
+    if hasattr(document_processor, 'is_processing') and document_processor.is_processing:
+        await query.edit_message_text(
+            "⚠️ В данный момент уже выполняется загрузка документов. Дождитесь окончания или используйте /cancel для отмены."
+        )
+        return
+    
+    # Отправляем сообщение о начале процесса
+    await query.edit_message_text("🔄 Начинаю обновление поискового индекса...")
+    
+    # Создаем функцию обратного вызова для отображения прогресса
+    async def update_progress(message):
+        try:
+            await query.edit_message_text(message)
+        except Exception as e:
+            # Если сообщение слишком длинное, отправляем новое
+            if "message is too long" in str(e).lower() or "message is not modified" in str(e).lower():
+                pass  # Игнорируем ошибки обновления для callback
+    
+    # Устанавливаем callback для обновления сообщений
+    document_processor.update_callback = update_progress
+    
+    try:
+        # Сначала загружаем файлы, если они еще не загружены
+        if not document_processor.files:
+            await query.edit_message_text("🔄 Загружаю документы для создания индекса...")
+            files = await document_processor.upload_documents()
+            if not files:
+                await query.edit_message_text(
+                    "⚠️ Не удалось загрузить файлы для индексации. Проверьте наличие документов в директории data/md."
+                )
+                return
+        
+        # Пересоздаем индекс принудительно
+        search_index = await document_processor.create_search_index(force_recreate=True)
+        
+        if not search_index:
+            await query.edit_message_text(
+                "❌ Не удалось создать поисковый индекс. Проверьте логи для получения дополнительной информации."
+            )
+            return
+            
+        # Создаем инструмент поиска и обновляем ассистента
+        await query.edit_message_text("🔧 Обновляю ассистента с новым индексом...")
+        
+        # Создаем инструмент поиска
+        if sdk:
+            search_tool = sdk.tools.search_index(search_index)
+        else:
+            await query.edit_message_text("❌ SDK не инициализирован")
+            return
+        
+        # Проверяем текущего ассистента
+        if session_manager and session_manager.assistant:
+            # Инструкция для ассистента
+            instruction = f"""
+Инструкция:
+1.  Всегда проверяй наличие ссылок на изображения вида ![](_page_X_Picture_Y.jpeg) в найденных текстовых частях контекста.
+2.  Если для вопроса пользователя найдено релевантное изображение, упоминай о его наличии и рекомендуй загрузку по предоставленной ссылке (если она
+есть).
+3.  Отвечай на русском языке, используя в первую очередь информацию из локального контента без внешних источников.
+
+Формат ответа с изображениями:
+- Если в текстовых частях контекста есть ссылки на изображения, обязательно добавь в ответ ссылки на них.
+- Если есть ссылки, то указывай явно: См. также изображение [./data/book1/images/page_X_Picture_Y.jpeg]"""
+            
+            try:
+                if sdk:
+                    # Создаем нового ассистента с новым инструментом поиска
+                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = model.configure(temperature=DEFAULT_TEMPERATURE)
+                    assistant = sdk.assistants.create(
+                        model,
+                        instruction=instruction,
+                        max_prompt_tokens=5000,
+                        ttl_days=6,
+                        tools=[search_tool]
+                    )
+                else:
+                    await query.edit_message_text("❌ SDK не инициализирован")
+                    return
+            except Exception as e:
+                logger.error(f"Ошибка при создании ассистента: {e}")
+                # Пробуем базовый вариант без инструкции
+                if sdk:
+                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = model.configure(temperature=DEFAULT_TEMPERATURE)
+                    assistant = sdk.assistants.create(
+                        model,
+                        tools=[search_tool]
+                    )
+                else:
+                    await query.edit_message_text("❌ SDK не инициализирован")
+                    return
+            
+            # Обновляем ассистента в менеджере сессий
+            session_manager.assistant = assistant
+            
+            await query.edit_message_text("✅ Поисковый индекс успешно обновлен! Новый документ включен в поиск.")
+        else:
+            await query.edit_message_text(
+                "⚠️ Поисковый индекс создан, но не удалось обновить ассистента. Попробуйте перезапустить бота командой /start"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении индекса: {e}")
+        await query.edit_message_text(f"❌ Произошла ошибка при обновлении индекса: {str(e)[:100]}...")
+
+
 async def handle_detailed_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик callback для кнопки 'Развернутый ответ'"""
+    """Обработчик callback для кнопок 'Развернутый ответ' и 'Обновить индекс'"""
     query = update.callback_query
     if not query or not update.effective_user:
         return
@@ -313,6 +543,7 @@ async def handle_detailed_answer_callback(update: Update, context: ContextTypes.
     await query.answer()
     
     user_id = update.effective_user.id
+    callback_data = query.data
     
     # Если бот еще не инициализирован, запускаем инициализацию
     global session_manager
@@ -327,22 +558,28 @@ async def handle_detailed_answer_callback(update: Update, context: ContextTypes.
             )
             return
     
-    # Отправляем сообщение о том, что бот обрабатывает запрос
-    await query.edit_message_text("Готовлю более развернутый ответ...")
+    # Обрабатываем разные типы callback
+    if callback_data == "detailed_answer":
+        # Отправляем сообщение о том, что бот обрабатывает запрос
+        await query.edit_message_text("Готовлю более развернутый ответ...")
+        
+        try:
+            if session_manager:
+                # Отправляем запрос на развернутый ответ
+                response = await session_manager.send_message(user_id, "Дай более развернутый ответ")
+                
+                await query.edit_message_text(response)
+            else:
+                await query.edit_message_text("Ошибка: сессия не инициализирована")
+        except Exception as e:
+            logger.error(f"Ошибка при обработке callback для подробного ответа: {e}")
+            await query.edit_message_text(
+                "Произошла ошибка при получении подробного ответа. Пожалуйста, попробуйте еще раз."
+            )
     
-    try:
-        if session_manager:
-            # Отправляем запрос на развернутый ответ
-            response = await session_manager.send_message(user_id, "Дай более развернутый ответ")
-            
-            await query.edit_message_text(response)
-        else:
-            await query.edit_message_text("Ошибка: сессия не инициализирована")
-    except Exception as e:
-        logger.error(f"Ошибка при обработке callback для подробного ответа: {e}")
-        await query.edit_message_text(
-            "Произошла ошибка при получении подробного ответа. Пожалуйста, попробуйте еще раз."
-        )
+    elif callback_data == "reindex_after_upload":
+        # Запускаем пересоздание индекса после загрузки документа
+        await run_reindex_process(query)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -560,9 +797,11 @@ async def main():
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("reindex", reindex_command))
+    application.add_handler(CommandHandler("upload", upload_command)) # Регистрируем обработчик команды /upload
 
     # Регистрация обработчика текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document)) # Регистрируем обработчик загруженных документов
 
     # Регистрация обработчика callback-запросов
     application.add_handler(CallbackQueryHandler(handle_detailed_answer_callback))
