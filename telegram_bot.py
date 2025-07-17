@@ -34,6 +34,8 @@ load_dotenv()
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+YANDEX_MODEL_NAME = os.getenv("YANDEX_MODEL_NAME", "yandexgpt-lite")
+YANDEX_MODEL_VERSION = os.getenv("YANDEX_MODEL_VERSION", "rc")
 DEFAULT_SYSTEM_PROMPT = os.getenv("DEFAULT_SYSTEM_PROMPT", "Вы - полезный ассистент.")
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.5"))
 SHORT_MESSAGE_THRESHOLD = int(os.getenv("SHORT_MESSAGE_THRESHOLD", "300"))
@@ -378,7 +380,7 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             try:
                 if sdk:
                     # Создаем нового ассистента с новым инструментом поиска
-                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
                     model = model.configure(temperature=DEFAULT_TEMPERATURE)
                     assistant = sdk.assistants.create(
                         model,
@@ -394,7 +396,7 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logger.error(f"Ошибка при создании ассистента: {e}")
                 # Пробуем базовый вариант без инструкции
                 if sdk:
-                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
                     model = model.configure(temperature=DEFAULT_TEMPERATURE)
                     assistant = sdk.assistants.create(
                         model,
@@ -494,7 +496,7 @@ async def run_reindex_process(query):
             try:
                 if sdk:
                     # Создаем нового ассистента с новым инструментом поиска
-                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
                     model = model.configure(temperature=DEFAULT_TEMPERATURE)
                     assistant = sdk.assistants.create(
                         model,
@@ -510,7 +512,7 @@ async def run_reindex_process(query):
                 logger.error(f"Ошибка при создании ассистента: {e}")
                 # Пробуем базовый вариант без инструкции
                 if sdk:
-                    model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+                    model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
                     model = model.configure(temperature=DEFAULT_TEMPERATURE)
                     assistant = sdk.assistants.create(
                         model,
@@ -734,7 +736,7 @@ async def initialize_yandex_cloud(update: Update | None = None):
     try:
         # Создание ассистента с правильным API
         if search_tool:
-            model = sdk.models.completions("yandexgpt-lite", model_version="rc")
+            model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
             model = model.configure(temperature=DEFAULT_TEMPERATURE)
             assistant = sdk.assistants.create(
                 model,
