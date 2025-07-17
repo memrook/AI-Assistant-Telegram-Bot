@@ -18,7 +18,6 @@ from document_processor import DocumentProcessor
 from session_manager import SessionManager
 
 # TODO Добавить функцию загрузки документов через Телеграм
-# TODO Добавить к ответам бота кнопку "Ответь подробнее" для более развернутого ответа
 
 # Настройка логирования
 logging.basicConfig(
@@ -35,6 +34,7 @@ YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_SYSTEM_PROMPT = os.getenv("DEFAULT_SYSTEM_PROMPT", "Вы - полезный ассистент.")
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.5"))
+SHORT_MESSAGE_THRESHOLD = int(os.getenv("SHORT_MESSAGE_THRESHOLD", "300"))
 
 # Глобальные переменные для SDK, индекса и менеджера сессий
 sdk = None
@@ -320,12 +320,7 @@ async def handle_detailed_answer_callback(update: Update, context: ContextTypes.
         await query.edit_message_text(
             "Начинаю инициализацию бота. Это может занять некоторое время..."
         )
-        # Создаем временный update для передачи в initialize_yandex_cloud
-        temp_update = Update(
-            update_id=update.update_id,
-            message=query.message
-        )
-        success = await initialize_yandex_cloud(temp_update)
+        success = await initialize_yandex_cloud(None)
         if not success:
             await query.edit_message_text(
                 "❌ Не удалось инициализировать бота. Пожалуйста, обратитесь к администратору."
@@ -340,13 +335,7 @@ async def handle_detailed_answer_callback(update: Update, context: ContextTypes.
             # Отправляем запрос на развернутый ответ
             response = await session_manager.send_message(user_id, "Дай более развернутый ответ")
             
-            # Проверяем длину ответа и добавляем кнопку, если ответ короткий
-            if len(response) < 300:
-                keyboard = [[InlineKeyboardButton("Развернутый ответ", callback_data="detailed_answer")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(response, reply_markup=reply_markup)
-            else:
-                await query.edit_message_text(response)
+            await query.edit_message_text(response)
         else:
             await query.edit_message_text("Ошибка: сессия не инициализирована")
     except Exception as e:
@@ -390,7 +379,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             response = await session_manager.send_message(user_id, user_message)
             
             # Проверяем длину ответа и добавляем кнопку, если ответ короткий
-            if len(response) < 300:
+            if len(response) < SHORT_MESSAGE_THRESHOLD:
                 keyboard = [[InlineKeyboardButton("Развернутый ответ", callback_data="detailed_answer")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await processing_message.edit_text(response, reply_markup=reply_markup)
