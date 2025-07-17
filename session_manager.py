@@ -91,7 +91,7 @@ class SessionManager:
                 logger.info(f"Попытка {attempt + 1}/{max_retries} запуска ассистента для пользователя {user_id}")
                 
                 # Используем базовый запуск ассистента (совместимый с новой версией API)
-                run = self.assistant.run(thread, custom_temperature=0.5, custom_max_tokens=1000)
+                run = self.assistant.run(thread)
                 logger.info(f"Run запущен (попытка {attempt + 1})")
                 
                 # Ждем результат от ассистента с улучшенной обработкой ошибок
