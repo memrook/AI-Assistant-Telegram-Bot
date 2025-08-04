@@ -1,10 +1,12 @@
 import logging
 import json
 import asyncio
-from typing import Dict, List
+import time
+from typing import Dict, List, Optional
 from yandex_cloud_ml_sdk import YCloudML
 from yandex_cloud_ml_sdk._assistants.assistant import Assistant
 from yandex_cloud_ml_sdk._threads.thread import Thread
+from database import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -12,11 +14,37 @@ logger = logging.getLogger(__name__)
 class SessionManager:
     """Класс для управления сессиями и тредами пользователей"""
     
-    def __init__(self, sdk: YCloudML, assistant: Assistant):
+    def __init__(self, sdk: YCloudML, assistant: Assistant, db_manager: DatabaseManager = None):
         self.sdk = sdk
         self.assistant = assistant
         self.user_threads: Dict[int, Thread] = {}
         self.conversation_history: Dict[int, List[Dict]] = {}  # Хранение истории сообщений для каждого пользователя
+        self.db_manager = db_manager or DatabaseManager()
+        self.user_db_ids: Dict[int, int] = {}  # Маппинг telegram_id -> db_user_id
+        self.active_conversations: Dict[int, int] = {}  # Маппинг telegram_id -> conversation_id
+    
+    async def initialize_user_in_db(self, telegram_id: int, username: str = None, 
+                                   first_name: str = None, last_name: str = None) -> int:
+        """Инициализирует пользователя в базе данных и возвращает его db_user_id"""
+        if telegram_id not in self.user_db_ids:
+            db_user_id = await self.db_manager.get_or_create_user(
+                telegram_id, username, first_name, last_name
+            )
+            self.user_db_ids[telegram_id] = db_user_id
+            logger.info(f"Пользователь {telegram_id} инициализирован в БД с ID {db_user_id}")
+        return self.user_db_ids[telegram_id]
+    
+    async def start_conversation_in_db(self, telegram_id: int) -> int:
+        """Начинает новый диалог в базе данных"""
+        db_user_id = self.user_db_ids.get(telegram_id)
+        if not db_user_id:
+            logger.warning(f"Пользователь {telegram_id} не найден в БД при начале диалога")
+            return None
+            
+        conversation_id = await self.db_manager.start_conversation(db_user_id)
+        self.active_conversations[telegram_id] = conversation_id
+        logger.info(f"Начат диалог {conversation_id} для пользователя {telegram_id}")
+        return conversation_id
         
     async def get_user_thread(self, user_id: int) -> Thread:
         """Получает тред пользователя или создает новый, если тред не существует"""
@@ -44,12 +72,32 @@ class SessionManager:
         if len(self.conversation_history[user_id]) > 20:
             self.conversation_history[user_id] = self.conversation_history[user_id][-20:]
     
-    async def send_message(self, user_id: int, message: str) -> str:
+    async def send_message(self, user_id: int, message: str, 
+                          username: str = None, first_name: str = None, last_name: str = None) -> str:
         """Отправляет сообщение в тред пользователя и получает ответ от ассистента"""
+        start_time = time.time()
+        
+        # Инициализируем пользователя в БД если нужно
+        await self.initialize_user_in_db(user_id, username, first_name, last_name)
+        
+        # Проверяем активный диалог или начинаем новый
+        conversation_id = self.active_conversations.get(user_id)
+        if not conversation_id:
+            conversation_id = await self.start_conversation_in_db(user_id)
+        
         thread = await self.get_user_thread(user_id)
         
         # Сохраняем сообщение пользователя в истории
         self._add_to_history(user_id, "user", message)
+        
+        # Сохраняем сообщение пользователя в БД
+        if self.db_manager and conversation_id:
+            try:
+                await self.db_manager.add_message(
+                    conversation_id, "user", message, "text"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка сохранения сообщения пользователя в БД: {e}")
         
         try:
             # Записываем сообщение пользователя в тред используя стандартный метод
@@ -61,10 +109,23 @@ class SessionManager:
             
             result = await self._run_assistant_with_retry(thread, user_id)
             
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            
             if result is None:
                 # Если результат None, значит произошла ошибка при выполнении
                 error_msg = "Ассистент не смог обработать ваш запрос. Попробуйте переформулировать вопрос или повторить позже."
                 self._add_to_history(user_id, "assistant", error_msg)
+                
+                # Сохраняем ошибку в БД
+                if self.db_manager and conversation_id:
+                    try:
+                        await self.db_manager.add_message(
+                            conversation_id, "assistant", error_msg, "text",
+                            processing_time_ms, None, True, "Assistant returned None result"
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка сохранения ошибочного ответа в БД: {e}")
+                
                 return error_msg
             
             # Формируем ответ из результата
@@ -75,13 +136,35 @@ class SessionManager:
             
             # Сохраняем ответ ассистента в истории
             self._add_to_history(user_id, "assistant", response)
+            
+            # Сохраняем ответ ассистента в БД
+            if self.db_manager and conversation_id:
+                try:
+                    await self.db_manager.add_message(
+                        conversation_id, "assistant", response, "text",
+                        processing_time_ms, None, False, None
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения ответа ассистента в БД: {e}")
                 
-            logger.info(f"Получен ответ для пользователя {user_id}")
+            logger.info(f"Получен ответ для пользователя {user_id} за {processing_time_ms}мс")
             return response
                 
         except Exception as e:
+            processing_time_ms = int((time.time() - start_time) * 1000)
             error_msg = f"Ошибка при записи сообщения в тред: {e}"
             logger.error(error_msg)
+            
+            # Сохраняем ошибку в БД
+            if self.db_manager and conversation_id:
+                try:
+                    await self.db_manager.add_message(
+                        conversation_id, "assistant", f"Произошла ошибка при отправке сообщения: {str(e)}", 
+                        "text", processing_time_ms, None, True, str(e)
+                    )
+                except Exception as db_e:
+                    logger.error(f"Ошибка сохранения ошибки в БД: {db_e}")
+            
             return f"Произошла ошибка при отправке сообщения: {str(e)}"
     
     async def _run_assistant_with_retry(self, thread, user_id: int, max_retries: int = 3):
@@ -245,6 +328,18 @@ class SessionManager:
     
     async def reset_user_thread(self, user_id: int) -> None:
         """Сбрасывает тред пользователя, создавая новый"""
+        # Завершаем текущий диалог в БД
+        conversation_id = self.active_conversations.get(user_id)
+        if conversation_id and self.db_manager:
+            try:
+                await self.db_manager.end_conversation(conversation_id)
+                logger.info(f"Завершен диалог {conversation_id} для пользователя {user_id}")
+            except Exception as e:
+                logger.error(f"Ошибка завершения диалога в БД: {e}")
+        
+        # Удаляем из активных диалогов
+        self.active_conversations.pop(user_id, None)
+        
         if user_id in self.user_threads:
             logger.info(f"Сбрасываем тред для пользователя {user_id}")
             thread = self.sdk.threads.create()
@@ -263,5 +358,35 @@ class SessionManager:
             formatted_history.append(f"{role}: {message['content']}")
             
         return "\n\n".join(formatted_history)
+    
+    async def get_user_stats_from_db(self, user_id: int) -> Optional[Dict]:
+        """Получает статистику пользователя из базы данных"""
+        if not self.db_manager:
+            return None
+        try:
+            return await self.db_manager.get_user_stats(user_id)
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики пользователя из БД: {e}")
+            return None
+    
+    async def get_global_stats_from_db(self, days: int = 30) -> Optional[Dict]:
+        """Получает глобальную статистику из базы данных"""
+        if not self.db_manager:
+            return None
+        try:
+            return await self.db_manager.get_global_stats(days)
+        except Exception as e:
+            logger.error(f"Ошибка получения глобальной статистики из БД: {e}")
+            return None
+    
+    async def export_user_conversations(self, user_id: int, start_date: str = None, end_date: str = None) -> Optional[List]:
+        """Экспортирует диалоги пользователя из базы данных"""
+        if not self.db_manager:
+            return None
+        try:
+            return await self.db_manager.export_conversations(user_id, start_date, end_date)
+        except Exception as e:
+            logger.error(f"Ошибка экспорта диалогов из БД: {e}")
+            return None
 
  

@@ -18,6 +18,7 @@ from yandex_cloud_ml_sdk import YCloudML
 
 from document_processor import DocumentProcessor
 from session_manager import SessionManager
+from database import DatabaseManager
 
 
 
@@ -40,11 +41,15 @@ DEFAULT_SYSTEM_PROMPT = os.getenv("DEFAULT_SYSTEM_PROMPT", "Вы - полезн�
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.5"))
 SHORT_MESSAGE_THRESHOLD = int(os.getenv("SHORT_MESSAGE_THRESHOLD", "300"))
 
+# ID администраторов (через запятую)
+ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
+
 # Глобальные переменные для SDK, индекса и менеджера сессий
 sdk = None
 session_manager = None
 initialization_message = None
 document_processor = None
+db_manager = None
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -197,6 +202,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/status - Получить статус загрузки документов\n"
         "/cancel - Отменить текущую загрузку документов\n"
         "/history - Показать историю разговора\n"
+        "/mystats - Показать мою статистику использования\n"
+        "/analytics - Показать общую аналитику бота (только для админов)\n"
+        "/export - Экспортировать мои диалоги в JSON\n"
+        "/cleanup - Очистить старые данные из БД (только для админов)\n"
         "/reindex - Принудительно пересоздать поисковый индекс"
     )
 
@@ -295,6 +304,269 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             for i, part in enumerate(parts[1:], 2):
                 await update.message.reply_text(f"📝 История разговора (часть {i}/{len(parts)}):\n\n{part}")
+
+
+async def mystats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /mystats - показывает статистику пользователя"""
+    if not update.message or not update.effective_user:
+        return
+        
+    global session_manager
+
+    if not session_manager:
+        await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
+        return
+
+    user_id = update.effective_user.id
+    
+    # Показываем сообщение о загрузке
+    loading_message = await update.message.reply_text("📊 Загружаю вашу статистику...")
+    
+    try:
+        stats = await session_manager.get_user_stats_from_db(user_id)
+        
+        if not stats:
+            await loading_message.edit_text(
+                "📊 Статистика пока недоступна.\n\n"
+                "Возможные причины:\n"
+                "• Вы еще не общались с ботом\n"
+                "• База данных не инициализирована\n"
+                "• Произошла ошибка при получении данных"
+            )
+            return
+        
+        # Форматируем статистику
+        stats_text = f"""📊 **Ваша статистика использования**
+
+📈 **Общие показатели:**
+• Всего сообщений: {stats.get('total_messages', 0)}
+• Всего диалогов: {stats.get('total_conversations', 0)}
+• Первое использование: {stats.get('created_at', 'Неизвестно')}
+• Последняя активность: {stats.get('last_active', 'Неизвестно')}
+
+📊 **Средние показатели:**
+• Сообщений на диалог: {stats.get('avg_messages_per_conversation', 0)}
+• Длительность диалога: {stats.get('avg_conversation_duration_minutes', 0)} мин."""
+
+        # Добавляем активность по дням если есть
+        daily_activity = stats.get('daily_activity', [])
+        if daily_activity:
+            stats_text += "\n\n📅 **Активность по дням (последние 30 дней):**\n"
+            for day_data in daily_activity[:10]:  # Показываем последние 10 дней
+                stats_text += f"• {day_data['day']}: {day_data['messages']} сообщений\n"
+        
+        await loading_message.edit_text(stats_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики пользователя: {e}")
+        await loading_message.edit_text(
+            "❌ Произошла ошибка при получении статистики. "
+            "Попробуйте позже или обратитесь к администратору."
+        )
+
+
+async def analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /analytics - показывает общую аналитику бота"""
+    if not update.message or not update.effective_user:
+        return
+        
+    global session_manager
+
+    if not session_manager:
+        await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
+        return
+
+    # Проверка на админа через переменные окружения
+    user_id = update.effective_user.id
+    
+    if not ADMIN_IDS:
+        await update.message.reply_text("❌ Администраторы не настроены. Обратитесь к владельцу бота.")
+        return
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Эта команда доступна только администраторам.")
+        return
+    
+    # Показываем сообщение о загрузке
+    loading_message = await update.message.reply_text("📈 Загружаю аналитику бота...")
+    
+    try:
+        # Получаем статистику за разные периоды
+        stats_7d = await session_manager.get_global_stats_from_db(7)
+        stats_30d = await session_manager.get_global_stats_from_db(30)
+        
+        if not stats_30d:
+            await loading_message.edit_text(
+                "📈 Аналитика пока недоступна.\n"
+                "База данных может быть пустой или произошла ошибка."
+            )
+            return
+        
+        # Форматируем аналитику
+        analytics_text = f"""📈 **Общая аналитика бота**
+
+📊 **За последние 30 дней:**
+• Пользователей: {stats_30d.get('total_users', 0)}
+• Диалогов: {stats_30d.get('total_conversations', 0)}
+• Сообщений: {stats_30d.get('total_messages', 0)}
+• Процент ошибок: {stats_30d.get('error_rate', 0)}%
+• Среднее время ответа: {stats_30d.get('avg_processing_time_ms', 0)}мс
+
+📊 **За последние 7 дней:**
+• Пользователей: {stats_7d.get('total_users', 0) if stats_7d else 0}
+• Диалогов: {stats_7d.get('total_conversations', 0) if stats_7d else 0}
+• Сообщений: {stats_7d.get('total_messages', 0) if stats_7d else 0}"""
+
+        # Добавляем активность по дням
+        daily_activity = stats_30d.get('daily_activity', [])
+        if daily_activity:
+            analytics_text += "\n\n📅 **Активность по дням (последние 7 дней):**\n"
+            for day_data in daily_activity[:7]:
+                analytics_text += f"• {day_data['day']}: {day_data['active_users']} польз., {day_data['messages']} сообщ.\n"
+        
+        # Добавляем топ часов активности
+        hourly_stats = stats_30d.get('hourly_distribution', [])
+        if hourly_stats:
+            analytics_text += "\n\n🕐 **Топ часов активности:**\n"
+            for hour_data in hourly_stats[:5]:
+                analytics_text += f"• {hour_data['hour']:02d}:00 - {hour_data['messages']} сообщений\n"
+        
+        await loading_message.edit_text(analytics_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения аналитики: {e}")
+        await loading_message.edit_text(
+            "❌ Произошла ошибка при получении аналитики. "
+            "Попробуйте позже или проверьте логи."
+        )
+
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /export - экспортирует диалоги пользователя"""
+    if not update.message or not update.effective_user:
+        return
+        
+    global session_manager
+
+    if not session_manager:
+        await update.message.reply_text("⚠️ Бот еще не инициализирован. Используйте /start для начала инициализации.")
+        return
+
+    user_id = update.effective_user.id
+    
+    # Показываем сообщение о загрузке
+    loading_message = await update.message.reply_text("📦 Экспортирую ваши диалоги...")
+    
+    try:
+        conversations = await session_manager.export_user_conversations(user_id)
+        
+        if not conversations:
+            await loading_message.edit_text(
+                "📦 У вас пока нет диалогов для экспорта.\n"
+                "Начните общение с ботом, и данные будут сохранены."
+            )
+            return
+        
+        # Создаем JSON файл
+        import json
+        from datetime import datetime
+        
+        export_data = {
+            'export_date': datetime.now().isoformat(),
+            'user_id': user_id,
+            'total_conversations': len(conversations),
+            'conversations': conversations
+        }
+        
+        json_content = json.dumps(export_data, ensure_ascii=False, indent=2)
+        
+        # Сохраняем во временный файл
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+            f.write(json_content)
+            temp_file_path = f.name
+        
+        # Отправляем файл пользователю
+        filename = f"диалоги_пользователя_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        with open(temp_file_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filename,
+                caption=f"📦 Экспорт ваших диалогов\n\n"
+                       f"📊 Всего диалогов: {len(conversations)}\n"
+                       f"📅 Дата экспорта: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            )
+        
+        # Удаляем временный файл
+        os.unlink(temp_file_path)
+        
+        await loading_message.delete()
+        
+    except Exception as e:
+        logger.error(f"Ошибка экспорта диалогов: {e}")
+        await loading_message.edit_text(
+            "❌ Произошла ошибка при экспорте диалогов. "
+            "Попробуйте позже или обратитесь к администратору."
+        )
+
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /cleanup - очистка старых данных из БД"""
+    if not update.message or not update.effective_user:
+        return
+        
+    global session_manager
+
+    if not session_manager or not session_manager.db_manager:
+        await update.message.reply_text("⚠️ База данных не инициализирована.")
+        return
+
+    # Проверка на админа через переменные окружения
+    user_id = update.effective_user.id
+    
+    if not ADMIN_IDS:
+        await update.message.reply_text("❌ Администраторы не настроены. Обратитесь к владельцу бота.")
+        return
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Эта команда доступна только администраторам.")
+        return
+    
+    # Получаем параметр количества дней для хранения (по умолчанию 90 дней)
+    keep_days = 90
+    if context.args and len(context.args) > 0:
+        try:
+            keep_days = int(context.args[0])
+            if keep_days < 1:
+                await update.message.reply_text("❌ Количество дней должно быть больше 0.")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Некорректное количество дней. Используйте число.")
+            return
+    
+    # Показываем сообщение о начале очистки
+    loading_message = await update.message.reply_text(f"🧹 Начинаю очистку данных старше {keep_days} дней...")
+    
+    try:
+        result = await session_manager.db_manager.cleanup_old_data(keep_days)
+        
+        await loading_message.edit_text(
+            f"✅ Очистка завершена!\n\n"
+            f"📊 Результаты:\n"
+            f"• Удалено сообщений: {result['deleted_messages']}\n"
+            f"• Удалено диалогов: {result['deleted_conversations']}\n"
+            f"• Сохранены данные за последние {keep_days} дней"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка очистки данных: {e}")
+        await loading_message.edit_text(
+            "❌ Произошла ошибка при очистке данных. "
+            "Проверьте логи для получения дополнительной информации."
+        )
 
 
 async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -567,8 +839,16 @@ async def handle_detailed_answer_callback(update: Update, context: ContextTypes.
         
         try:
             if session_manager:
+                # Получаем информацию о пользователе
+                user = update.effective_user
+                username = user.username if user else None
+                first_name = user.first_name if user else None
+                last_name = user.last_name if user else None
+                
                 # Отправляем запрос на развернутый ответ
-                response = await session_manager.send_message(user_id, "Дай более развернутый ответ")
+                response = await session_manager.send_message(
+                    user_id, "Дай более развернутый ответ", username, first_name, last_name
+                )
                 
                 await query.edit_message_text(response)
             else:
@@ -615,7 +895,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         # Обычный режим работы с документами
         if session_manager:
-            response = await session_manager.send_message(user_id, user_message)
+            # Получаем информацию о пользователе
+            user = update.effective_user
+            username = user.username if user else None
+            first_name = user.first_name if user else None
+            last_name = user.last_name if user else None
+            
+            response = await session_manager.send_message(
+                user_id, user_message, username, first_name, last_name
+            )
             
             # Проверяем длину ответа и добавляем кнопку, если ответ короткий
             if len(response) < SHORT_MESSAGE_THRESHOLD:
@@ -635,7 +923,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def initialize_yandex_cloud(update: Update | None = None):
     """Инициализация Yandex Cloud SDK и создание ассистента"""
-    global sdk, session_manager, initialization_message, document_processor
+    global sdk, session_manager, initialization_message, document_processor, db_manager
     
     progress_message = None
     if update and update.message:
@@ -733,6 +1021,9 @@ async def initialize_yandex_cloud(update: Update | None = None):
 - Если в текстовых частях контекста есть ссылки на изображения, обязательно добавь в ответ ссылки на них.
 - Если есть ссылки, то указывай явно: См. также изображение [./data/book1/images/page_X_Picture_Y.jpeg]."""
 
+    # Инициализируем переменную assistant
+    assistant = None
+    
     try:
         # Создание ассистента с правильным API
         if search_tool:
@@ -748,15 +1039,19 @@ async def initialize_yandex_cloud(update: Update | None = None):
                 tools=tools
             )
             logger.info("Ассистент создан с инструкцией и инструментом поиска")
-        # else:
-        #     # Создание обычного ассистента без инструментов поиска
-        #     assistant = sdk.assistants.create(
-        #         "yandexgpt-lite", 
-        #         model_version="rc",
-        #         temperature=DEFAULT_TEMPERATURE,
-        #         instruction=instruction
-        #     )
-        #     logger.info("Создан обычный ассистент без инструментов поиска")
+        else:
+            # Создание обычного ассистента без инструментов поиска
+            model = sdk.models.completions(YANDEX_MODEL_NAME, model_version=YANDEX_MODEL_VERSION)
+            model = model.configure(temperature=DEFAULT_TEMPERATURE)
+            assistant = sdk.assistants.create(
+                model,
+                instruction=instruction,
+                temperature=0.5,
+                max_prompt_tokens=5000,
+                ttl_days=6,
+                expiration_policy="static"
+            )
+            logger.info("Создан обычный ассистент без инструментов поиска")
     except Exception as e:
         logger.error(f"Ошибка при создании ассистента: {e}")
         # Пробуем создать базового ассистента в случае ошибки
@@ -766,18 +1061,48 @@ async def initialize_yandex_cloud(update: Update | None = None):
         except Exception as e2:
             logger.error(f"Критическая ошибка при создании ассистента: {e2}")
             return False
+    
+    # Проверяем, что ассистент был создан
+    if assistant is None:
+        logger.error("Не удалось создать ассистента")
+        if progress_message:
+            await progress_message.edit_text("❌ Не удалось создать ассистента. Проверьте настройки и ключи API.")
+        return False
 
+    # Инициализация базы данных
+    if progress_message:
+        await progress_message.edit_text("🗄️ Инициализация базы данных...")
+    
+    logger.info("Инициализация базы данных")
+    db_manager = DatabaseManager()
+    await db_manager.init_database()
+    
     # Инициализация менеджера сессий
     if progress_message:
         await progress_message.edit_text(f"🔧 Инициализация менеджера сессий... Ассистент работает {mode}.")
 
     logger.info("Инициализация менеджера сессий")
-    session_manager = SessionManager(sdk, assistant)
+    session_manager = SessionManager(sdk, assistant, db_manager)
 
     if progress_message:
         await progress_message.edit_text(f"✅ Инициализация завершена! Бот готов к работе {mode}.")
 
     return True
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик ошибок"""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    # Пытаемся отправить сообщение об ошибке пользователю
+    if update and hasattr(update, 'effective_chat') and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Произошла ошибка при обработке вашего запроса. Попробуйте позже или обратитесь к администратору."
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
 
 async def main():
@@ -790,6 +1115,9 @@ async def main():
         return None
         
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Регистрируем обработчик ошибок
+    application.add_error_handler(error_handler)
 
     # Регистрация обработчиков команд
     application.add_handler(CommandHandler("start", start_command))
@@ -798,6 +1126,10 @@ async def main():
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(CommandHandler("mystats", mystats_command))
+    application.add_handler(CommandHandler("analytics", analytics_command))
+    application.add_handler(CommandHandler("export", export_command))
+    application.add_handler(CommandHandler("cleanup", cleanup_command))
     application.add_handler(CommandHandler("reindex", reindex_command))
     application.add_handler(CommandHandler("upload", upload_command)) # Регистрируем обработчик команды /upload
 

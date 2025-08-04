@@ -37,8 +37,7 @@ new-env/
 *.swo
 
 # Project specific
-data/md/
-data/docs/
+data/*
 *.log
 .DS_Store
 
@@ -68,3 +67,4 @@ data/docs/
 /data/bak/Создать AI-ассистента с поиском по PDF-файлам со сложным форматированием _ Yandex Cloud - Документация.pdf
 /data/index_config.json
 /data/bak/
+*.db
